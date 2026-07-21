@@ -8,14 +8,16 @@ import platform
 import sqlite3
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from flask import Blueprint, Response, current_app, flash, redirect, render_template, request, send_file, session, url_for
 from openpyxl import Workbook
 from werkzeug.utils import secure_filename
 
+from .auth import AuthError
 from .db import ORDER_FIELDS, TIMESTAMP_FIELDS, Database, utcnow
 from .imports import inspect_file, import_rows, read_csv_rows, read_xlsx_rows
 from .i18n import translate
@@ -31,7 +33,73 @@ def language() -> str:
     return value if value in ("de", "en") else "de"
 def common() -> dict[str, Any]:
     lang = language()
-    return {"locations": db().all("SELECT * FROM locations WHERE active=1 ORDER BY code"), "statuses": STATUS_VALUES, "unit": unit(), "language": lang, "t": lambda text: translate(text, lang)}
+    return {"locations": db().all("SELECT * FROM locations WHERE active=1 ORDER BY code"), "statuses": STATUS_VALUES, "unit": unit(), "language": lang, "t": lambda text: translate(text, lang), "auth_user": session.get("auth_user")}
+
+
+def _store_auth(result: dict[str, Any]) -> None:
+    user = result.get("user") or {}
+    if not user.get("id") or not user.get("email") or not result.get("access_token") or not result.get("refresh_token"):
+        raise AuthError("Die Anmeldung ist momentan nicht verfügbar.")
+    session.clear()
+    session.permanent = True
+    session["auth_user"] = {"id": user.get("id"), "email": user.get("email")}
+    session["access_token"] = result.get("access_token")
+    session["refresh_token"] = result.get("refresh_token")
+    session["auth_expires_at"] = int(datetime.now(timezone.utc).timestamp()) + int(result.get("expires_in") or 3600)
+
+
+def _safe_next(value: str | None) -> str:
+    if not value:
+        return url_for("main.index")
+    parsed = urlsplit(value)
+    return value if not parsed.scheme and not parsed.netloc and value.startswith("/") else url_for("main.index")
+
+
+@bp.before_app_request
+def require_login():
+    if not current_app.config.get("AUTH_REQUIRED"):
+        return None
+    if request.endpoint in {"main.login", "main.health", "static"}:
+        return None
+    if not session.get("auth_user"):
+        return redirect(url_for("main.login", next=request.full_path.rstrip("?")))
+    expires_at = int(session.get("auth_expires_at") or 0)
+    if expires_at <= int(datetime.now(timezone.utc).timestamp()) + 60:
+        refresh_token = session.get("refresh_token")
+        try:
+            if not refresh_token:
+                raise AuthError("Sitzung abgelaufen.")
+            _store_auth(current_app.extensions["auth"].refresh(refresh_token))
+        except AuthError:
+            session.clear()
+            return redirect(url_for("main.login", next=request.full_path.rstrip("?")))
+    return None
+
+
+@bp.route("/login", methods=["GET", "POST"])
+def login():
+    if session.get("auth_user"):
+        return redirect(url_for("main.index"))
+    error = None
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        if not email or not password:
+            error = "Bitte E-Mail-Adresse und Passwort eingeben."
+        else:
+            try:
+                _store_auth(current_app.extensions["auth"].sign_in(email, password))
+                return redirect(_safe_next(request.form.get("next")))
+            except AuthError as exc:
+                error = str(exc)
+    lang = language()
+    return render_template("login.html", error=error, next_url=_safe_next(request.args.get("next") or request.form.get("next")), language=lang, t=lambda text: translate(text, lang)), 401 if error else 200
+
+
+@bp.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("main.login"))
 
 
 @bp.route("/health")

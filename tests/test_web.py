@@ -1,4 +1,5 @@
 from app.services import save_order
+from app.auth import AuthError
 
 
 def add_order(app):
@@ -48,3 +49,57 @@ def test_language_setting_switches_global_ui(app, client):
     dashboard = client.get("/")
     assert b"Open orders" in dashboard.data
     assert b"Import data" in dashboard.data
+
+
+class FakeAuth:
+    configured = True
+
+    def sign_in(self, email, password):
+        if password != "correct-password":
+            raise AuthError("E-Mail-Adresse oder Passwort ist falsch.")
+        return {
+            "access_token": "access-token", "refresh_token": "refresh-token", "expires_in": 3600,
+            "user": {"id": "user-1", "email": email},
+        }
+
+    def refresh(self, refresh_token):
+        assert refresh_token == "refresh-token"
+        return self.sign_in("user@example.com", "correct-password")
+
+
+def test_supabase_login_protects_pages_and_logout(app):
+    app.config["AUTH_REQUIRED"] = True
+    app.extensions["auth"] = FakeAuth()
+    client = app.test_client()
+
+    protected = client.get("/")
+    assert protected.status_code == 302
+    assert "/login?next=/" in protected.headers["Location"]
+    assert client.get("/health").status_code == 200
+
+    failed = client.post("/login", data={"email": "user@example.com", "password": "wrong"})
+    assert failed.status_code == 401
+    assert "E-Mail-Adresse oder Passwort ist falsch".encode() in failed.data
+
+    logged_in = client.post("/login", data={
+        "email": "User@Example.com", "password": "correct-password", "next": "/settings",
+    })
+    assert logged_in.status_code == 302
+    assert logged_in.headers["Location"].endswith("/settings")
+    dashboard = client.get("/")
+    assert dashboard.status_code == 200
+    assert b"user@example.com" in dashboard.data
+    logged_out = client.post("/logout")
+    assert logged_out.status_code == 302
+    assert logged_out.headers["Location"].endswith("/login")
+
+
+def test_login_rejects_external_next_url(app):
+    app.config["AUTH_REQUIRED"] = True
+    app.extensions["auth"] = FakeAuth()
+    client = app.test_client()
+    response = client.post("/login", data={
+        "email": "user@example.com", "password": "correct-password", "next": "https://evil.example/",
+    })
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/")
