@@ -121,12 +121,12 @@ def normalize_row(raw: dict[str, Any], mapping: dict[str, str], db: Database) ->
     for key in ("line_count", "pallet_count"):
         if out.get(key) not in (None, ""): out[key] = int(decimal_value(out[key]) or 0)
     location_code = str(out.pop("location_code", "")).strip()
-    location = db.one("SELECT id FROM locations WHERE code=? COLLATE NOCASE OR name=? COLLATE NOCASE", (location_code, location_code))
+    location = db.one("SELECT id FROM locations WHERE LOWER(code)=LOWER(?) OR LOWER(name)=LOWER(?)", (location_code, location_code))
     if not location: raise ValueError(f"Unbekannter Standort: {location_code}")
     out["location_id"] = location["id"]
     reason = str(out.pop("delay_reason", "") or "").strip()
     if reason:
-        row = db.one("SELECT id FROM delay_reasons WHERE name=? COLLATE NOCASE", (reason,))
+        row = db.one("SELECT id FROM delay_reasons WHERE LOWER(name)=LOWER(?)", (reason,))
         if not row:
             with db.transaction() as con: rid = con.execute("INSERT INTO delay_reasons(name,category) VALUES (?,?)", (reason, "importiert")).lastrowid
             out["delay_reason_id"] = rid
@@ -141,7 +141,7 @@ def normalize_row(raw: dict[str, Any], mapping: dict[str, str], db: Database) ->
 def find_duplicate(db: Database, row: dict[str, Any]) -> int | None:
     clauses, params = [], []
     for field in ("tracking_id", "warehouse_order_no", "at_sales_order_no", "external_document_no"):
-        if row.get(field): clauses.append(f"{field}=? COLLATE NOCASE"); params.append(str(row[field]))
+        if row.get(field): clauses.append(f"LOWER({field})=LOWER(?)"); params.append(str(row[field]))
     if not clauses: return None
     found = db.one("SELECT id FROM orders WHERE " + " OR ".join(clauses) + " LIMIT 1", tuple(params))
     return found["id"] if found else None

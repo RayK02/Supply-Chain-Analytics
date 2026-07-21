@@ -29,6 +29,15 @@ def common() -> dict[str, Any]:
     return {"locations": db().all("SELECT * FROM locations WHERE active=1 ORDER BY code"), "statuses": STATUS_VALUES, "unit": unit()}
 
 
+@bp.route("/health")
+def health():
+    try:
+        db().scalar("SELECT 1")
+        return {"status": "ok", "database": "sqlite" if db().is_sqlite else "postgresql"}
+    except Exception:
+        return {"status": "error"}, 503
+
+
 @bp.app_template_filter("dt")
 def fmt_dt(value: Any) -> str:
     if not value: return "–"
@@ -259,7 +268,7 @@ def download_backup(filename: str):
 @bp.route("/system/restore", methods=["POST"])
 def restore():
     uploaded = request.files.get("backup")
-    if not uploaded or Path(uploaded.filename or "").suffix.lower() not in (".sqlite3", ".db"): flash("Bitte eine SQLite-Sicherung auswählen.", "error"); return redirect(url_for("main.system_info"))
+    if not uploaded or Path(uploaded.filename or "").suffix.lower() not in (".sqlite3", ".db"): flash("Bitte eine SQLite-Sicherung auswählen. Cloud-Restore erfolgt direkt über Supabase.", "error"); return redirect(url_for("main.system_info"))
     temp = Path(current_app.config["UPLOAD_DIR"]) / f"restore-{uuid.uuid4().hex}.sqlite3"; uploaded.save(temp)
     try: restore_backup(db(), temp, Path(current_app.config["BACKUP_DIR"])); flash("Sicherung wurde wiederhergestellt. Die vorherige Datenbank wurde automatisch gesichert.", "success")
     except Exception as exc: flash(f"Wiederherstellung abgebrochen: {exc}", "error")
