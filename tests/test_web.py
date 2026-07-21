@@ -28,3 +28,23 @@ def test_manual_validation_and_create(app,client):
     loc=app.extensions["db"].one("SELECT id FROM locations WHERE code='CH'")["id"]
     response=client.post("/orders/new",data={"tracking_id":"FORM-1","at_sales_order_no":"SO-FORM","location_id":loc,"order_at":"2026-07-01T08:00","priority":"normal","data_source":"Manuell"})
     assert response.status_code==302
+
+
+def test_language_setting_switches_global_ui(app, client):
+    response = client.post("/settings", data={
+        "warning_no_pick_days": "2", "warning_pick_idle_days": "2",
+        "warning_ready_pickup_days": "2", "display_unit": "workdays",
+        "language": "en", "system_type": "Datei",
+    }, follow_redirects=True)
+    assert response.status_code == 200
+    assert b'<html lang="en">' in response.data
+    assert b"Settings" in response.data
+    assert b"Language" in response.data
+    assert b"English" in response.data
+    assert b'value="Datei"' in response.data
+    assert b">File<" in response.data
+    assert app.extensions["db"].scalar("SELECT value FROM settings WHERE key='language'") == "en"
+
+    dashboard = client.get("/")
+    assert b"Open orders" in dashboard.data
+    assert b"Import data" in dashboard.data
