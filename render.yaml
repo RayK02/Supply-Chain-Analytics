@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: supply-chain-analytics
+    runtime: python
+    plan: free
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: waitress-serve --listen=0.0.0.0:$PORT run:app
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: TRACKER_NO_DEMO
+        value: "0"
+      - key: TRACKER_SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false

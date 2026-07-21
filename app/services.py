@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import shutil
 import sqlite3
 import statistics
@@ -166,7 +167,7 @@ def validate_order(data: dict[str, Any], db: Database, order_id: int | None = No
     for field in ("tracking_id", "warehouse_order_no", "at_sales_order_no"):
         value = str(data.get(field) or "").strip()
         if value:
-            row = db.one(f"SELECT id FROM orders WHERE {field}=? COLLATE NOCASE", (value,))
+            row = db.one(f"SELECT id FROM orders WHERE LOWER({field})=LOWER(?)", (value,))
             if row and row["id"] != order_id: errors.append(f"{field} ist bereits vorhanden.")
     return errors
 
@@ -280,14 +281,21 @@ def dashboard(db: Database, filters: dict[str, str] | None = None, unit: str = "
 
 def create_backup(db: Database, backup_dir: Path, reason: str = "Manuell") -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
-    target = backup_dir / f"tracker-{datetime.now():%Y%m%d-%H%M%S-%f}.sqlite3"
-    with db.connect() as src, sqlite3.connect(target) as dest: src.backup(dest)
+    if db.is_sqlite:
+        target = backup_dir / f"tracker-{datetime.now():%Y%m%d-%H%M%S-%f}.sqlite3"
+        with db.connect() as src, sqlite3.connect(target) as dest: src.backup(dest)
+    else:
+        target = backup_dir / f"tracker-{datetime.now():%Y%m%d-%H%M%S-%f}.json"
+        payload = {table: [dict(row) for row in db.all(f"SELECT * FROM {table}")] for table in ("locations", "delay_reasons", "orders", "events", "import_logs", "import_profiles", "settings")}
+        target.write_text(json.dumps(payload, ensure_ascii=False, default=str, indent=2), encoding="utf-8")
     with db.transaction() as con:
         con.execute("INSERT INTO backups(filename,created_at,size_bytes,reason) VALUES (?,?,?,?)", (target.name, utcnow(), target.stat().st_size, reason))
     return target
 
 
 def restore_backup(db: Database, backup: Path, backup_dir: Path) -> None:
+    if not db.is_sqlite:
+        raise ValueError("Cloud-Restore wird aus Sicherheitsgründen über Supabase Point-in-Time-Backup beziehungsweise SQL-Import durchgeführt.")
     if not backup.exists(): raise ValueError("Sicherungsdatei nicht gefunden.")
     test = sqlite3.connect(backup)
     try:

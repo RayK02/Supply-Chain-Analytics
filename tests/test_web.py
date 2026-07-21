@@ -12,6 +12,12 @@ def test_all_main_pages(app,client):
         response=client.get(url); assert response.status_code == 200, url
 
 
+def test_health_endpoint(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json == {"status": "ok", "database": "sqlite"}
+
+
 def test_exports(app,client):
     add_order(app)
     csv_resp=client.get("/export/orders.csv"); assert csv_resp.status_code==200 and b"Tracking-ID" in csv_resp.data

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0 – 2026-07-21
+
+- optionale Supabase-PostgreSQL-Unterstützung über `DATABASE_URL`
+- kostenloses Render-Blueprint und Docker-Deployment ergänzt
+- Health-Check, Cloud-Backup-Export und Deployment-Dokumentation
+- lokale SQLite-Version bleibt unverändert der Standard
+
 ## 1.0.0 – 2026-07-21
 
 - Lokale Flask-/SQLite-Anwendung mit automatischer Initialisierung und Beispieldaten

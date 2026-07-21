@@ -43,3 +43,7 @@ Unter **Systeminformationen** kann ein transaktionales SQLite-Backup erzeugt und
 ## Business-Central-Anbindung
 
 Die dateibasierten Connectoren sind produktiv. `BusinessCentralApiConnector` und `NavisionODataConnector` definieren dieselbe normalisierte Schnittstelle, benötigen aber die tatsächlich veröffentlichten Endpunkte und Authentifizierung. Details stehen in [NAVISION_INTEGRATION.md](NAVISION_INTEGRATION.md).
+
+## Optionale Cloud-Version
+
+Die lokale SQLite-Version bleibt der Standard. Mit `DATABASE_URL` kann dieselbe Anwendung Supabase PostgreSQL verwenden und über das enthaltene `render.yaml` kostenlos als Render-Webservice bereitgestellt werden. Die vollständige Anleitung und wichtige Sicherheitshinweise stehen in [CLOUD_DEPLOYMENT.md](CLOUD_DEPLOYMENT.md).
