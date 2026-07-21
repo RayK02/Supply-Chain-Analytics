@@ -1,8 +1,8 @@
 .venv/
+.env
 __pycache__/
 .pytest_cache/
 data/*.sqlite3
 data/uploads/*
 backups/*.sqlite3
 *.pyc
-
