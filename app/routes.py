@@ -18,6 +18,7 @@ from werkzeug.utils import secure_filename
 
 from .db import ORDER_FIELDS, TIMESTAMP_FIELDS, Database, utcnow
 from .imports import inspect_file, import_rows, read_csv_rows, read_xlsx_rows
+from .i18n import translate
 from .services import PHASES, STATUS_VALUES, TIMELINE, create_backup, dashboard, enrich_order, list_orders, restore_backup, save_order, validate_order
 
 bp = Blueprint("main", __name__)
@@ -25,8 +26,12 @@ bp = Blueprint("main", __name__)
 
 def db() -> Database: return current_app.extensions["db"]
 def unit() -> str: return request.args.get("unit") or db().scalar("SELECT value FROM settings WHERE key='display_unit'") or "workdays"
+def language() -> str:
+    value = db().scalar("SELECT value FROM settings WHERE key='language'") or "de"
+    return value if value in ("de", "en") else "de"
 def common() -> dict[str, Any]:
-    return {"locations": db().all("SELECT * FROM locations WHERE active=1 ORDER BY code"), "statuses": STATUS_VALUES, "unit": unit()}
+    lang = language()
+    return {"locations": db().all("SELECT * FROM locations WHERE active=1 ORDER BY code"), "statuses": STATUS_VALUES, "unit": unit(), "language": lang, "t": lambda text: translate(text, lang)}
 
 
 @bp.route("/health")
@@ -41,14 +46,17 @@ def health():
 @bp.app_template_filter("dt")
 def fmt_dt(value: Any) -> str:
     if not value: return "–"
-    try: return datetime.fromisoformat(str(value).replace("Z", "+00:00")).strftime("%d.%m.%Y %H:%M")
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.strftime("%Y-%m-%d %H:%M" if language() == "en" else "%d.%m.%Y %H:%M")
     except ValueError: return str(value)
 
 
 @bp.app_template_filter("num")
 def fmt_num(value: Any, digits: int = 1) -> str:
     if value is None: return "–"
-    return f"{float(value):,.{digits}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    formatted = f"{float(value):,.{digits}f}"
+    return formatted if language() == "en" else formatted.replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 @bp.route("/")
@@ -229,11 +237,14 @@ def settings():
     if request.method == "POST":
         now = utcnow()
         with db().transaction() as con:
-            for key in ("warning_no_pick_days","warning_pick_idle_days","warning_ready_pickup_days","display_unit"):
-                con.execute("INSERT INTO settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (key, request.form.get(key,""), now))
+            for key in ("warning_no_pick_days","warning_pick_idle_days","warning_ready_pickup_days","display_unit","language"):
+                value = request.form.get(key, "")
+                if key == "language" and value not in ("de", "en"): value = "de"
+                con.execute("INSERT INTO settings(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", (key, value, now))
             cfg = {key: request.form.get(key,"").strip() for key in ("system_type","base_url","tenant","environment","company","client_id","scope","api_version")}
             con.execute("UPDATE settings SET value=?,updated_at=? WHERE key='connector_config'", (json.dumps(cfg), now))
-        flash("Einstellungen gespeichert. Zugangsdaten werden bewusst nicht gespeichert.", "success"); return redirect(request.url)
+        lang = request.form.get("language") if request.form.get("language") in ("de", "en") else "de"
+        flash(translate("Einstellungen gespeichert. Zugangsdaten werden bewusst nicht gespeichert.", lang), "success"); return redirect(request.url)
     values = {r["key"]:r["value"] for r in db().all("SELECT * FROM settings")}; connector = json.loads(values.get("connector_config","{}"))
     return render_template("settings.html", values=values, connector=connector, title="Einstellungen", **common())
 
