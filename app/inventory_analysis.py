@@ -221,7 +221,7 @@ def calculate_analysis(
             "Der Analysebeginn liegt innerhalb des Durchschnittsfensters. "
             "Der davorliegende Teil wird als Absatz 0 berücksichtigt."
         )
-    if average_start and data_start and data_start > average_start:
+    elif average_start and data_start and data_start > average_start:
         warnings.append(
             "Die Quelldaten beginnen nach dem Start des Durchschnittsfensters. "
             "Fehlende frühere Monate werden als Absatz 0 berücksichtigt."
