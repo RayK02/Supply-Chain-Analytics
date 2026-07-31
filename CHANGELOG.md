@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0
+
+- Mehrbenutzer-Anmeldung über Supabase Auth ergänzt
+- alle fachlichen Seiten und Exporte durch eine serverseitige Sitzung geschützt
+- Abmeldung, automatische Token-Erneuerung und zweisprachige Login-Seite ergänzt
+
 ## 1.1.0 – 2026-07-21
 
 - optionale Supabase-PostgreSQL-Unterstützung über `DATABASE_URL`

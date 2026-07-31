@@ -47,3 +47,7 @@ Die dateibasierten Connectoren sind produktiv. `BusinessCentralApiConnector` und
 ## Optionale Cloud-Version
 
 Die lokale SQLite-Version bleibt der Standard. Mit `DATABASE_URL` kann dieselbe Anwendung Supabase PostgreSQL verwenden und über das enthaltene `render.yaml` kostenlos als Render-Webservice bereitgestellt werden. Die vollständige Anleitung und wichtige Sicherheitshinweise stehen in [CLOUD_DEPLOYMENT.md](CLOUD_DEPLOYMENT.md).
+
+### Mehrbenutzer-Login
+
+Für die veröffentlichte App kann Supabase Auth mit E-Mail und Passwort aktiviert werden. Setze dazu `TRACKER_AUTH_REQUIRED=1`, `SUPABASE_URL` und `SUPABASE_ANON_KEY`; bei HTTPS zusätzlich `TRACKER_SECURE_COOKIES=1`. Benutzer werden unter **Supabase → Authentication → Users** angelegt. Eine öffentliche Selbstregistrierung bietet die App bewusst nicht an.

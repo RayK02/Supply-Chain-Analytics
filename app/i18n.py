@@ -41,6 +41,17 @@ TRANSLATIONS = {
     "Einstellungen speichern": "Save settings",
     "Konfiguration prüfen": "Validate configuration",
     "Einstellungen gespeichert. Zugangsdaten werden bewusst nicht gespeichert.": "Settings saved. Credentials are deliberately not stored.",
+    "Anmelden": "Sign in",
+    "Abmelden": "Sign out",
+    "E-Mail-Adresse": "Email address",
+    "Passwort": "Password",
+    "Melden Sie sich mit Ihrem freigegebenen Supabase-Konto an.": "Sign in with your approved Supabase account.",
+    "Neue Benutzer werden durch einen Administrator in Supabase angelegt.": "New users are created by an administrator in Supabase.",
+    "Bitte E-Mail-Adresse und Passwort eingeben.": "Enter your email address and password.",
+    "E-Mail-Adresse oder Passwort ist falsch.": "The email address or password is incorrect.",
+    "Die Anmeldung ist noch nicht vollständig konfiguriert.": "Sign-in has not been fully configured yet.",
+    "Der Anmeldedienst ist momentan nicht erreichbar.": "The sign-in service is currently unavailable.",
+    "Die Anmeldung ist momentan nicht verfügbar.": "Sign-in is currently unavailable.",
 }
 
 
