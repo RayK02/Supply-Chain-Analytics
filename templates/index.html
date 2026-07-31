@@ -21,7 +21,7 @@
         <h2>Arbeitsmappen analysieren</h2>
         <p>Die Analyse-Datei liefert Artikelposten, Artikelstamm und VPE. Zusätzliche IST-Dateien liefern die aktuellsten Lagerhaltungsdaten.</p>
       </div>
-      <form action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data" class="upload-form upload-grid">
+      <form id="analysisForm" data-settings-submitted="{{ 'true' if settings_submitted else 'false' }}" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data" class="upload-form upload-grid">
         <label class="file-field">
           <strong>1. Analyse-Arbeitsmappe</strong>
           <span>Erforderlich: Artikelposten; optional Artikel_Stamm, VPE, Parameter und Lagerhaltungsdaten_IST.</span>
@@ -32,6 +32,29 @@
           <span>Optional, mehrere Dateien möglich. Erwartet z. B. Lagerhaltungsdatenübersicht mit Artikelnr., Lagerbestand, Minimalbestand, Bestellmenge und Maximalbestand.</span>
           <input type="file" name="current_files" accept=".xlsx" multiple>
         </label>
+
+        <fieldset class="analysis-settings">
+          <legend>3. Berechnungslogik</legend>
+          <label class="setting-field">
+            <strong>Durchschnittsmonate</strong>
+            <span>Letzte N Kalendermonate bis zum Enddatum; verwendet für Ø Monatsabsatz, XYZ, Mindestbestand und Bestellmenge.</span>
+            <input id="monthsAverage" type="number" name="months_average" min="1" max="36" step="1" value="{{ analysis_settings.months_average }}" required>
+          </label>
+          <label class="setting-field">
+            <strong>Startdatum Analyse</strong>
+            <span>Erster eingeschlossener Tag für Gesamtabsatz und ABC. Leer = erster Verkaufsabgang der Datei.</span>
+            <input id="analysisStartDate" type="date" name="analysis_start_date" value="{{ analysis_settings.analysis_start_date }}">
+          </label>
+          <label class="setting-field">
+            <strong>Enddatum Analyse</strong>
+            <span>Letzter eingeschlossener Tag und Stichtag für das Durchschnittsfenster. Leer = letzter Verkaufsabgang der Datei.</span>
+            <input id="analysisEndDate" type="date" name="analysis_end_date" value="{{ analysis_settings.analysis_end_date }}">
+          </label>
+          <p class="storage-note">
+            Gespeichert werden nur diese drei Einstellungen lokal in diesem Browser. Excel-Dateien und Analyseergebnisse werden nicht auf dem Server gespeichert.
+          </p>
+        </fieldset>
+
         <button type="submit">Analyse starten</button>
       </form>
     </section>
@@ -43,7 +66,18 @@
         <div>
           <p class="eyebrow">ANALYSE ABGESCHLOSSEN</p>
           <h2>{{ source_filename }}</h2>
-          <p>Stichtag: {{ meta.stichtag.strftime('%d.%m.%Y') if meta.stichtag else '–' }} · {{ results|length }} Artikel</p>
+          <p>
+            Analysezeitraum:
+            {{ meta.analysis_start.strftime('%d.%m.%Y') if meta.analysis_start else '–' }}
+            bis
+            {{ meta.analysis_end.strftime('%d.%m.%Y') if meta.analysis_end else '–' }}
+            · {{ results|length }} Artikel
+          </p>
+          <p class="source-list">
+            <strong>Durchschnitt:</strong> {{ meta.months_average }} Kalendermonate
+            ({{ meta.average_start.strftime('%d.%m.%Y') if meta.average_start else '–' }}
+            bis {{ meta.average_end.strftime('%d.%m.%Y') if meta.average_end else '–' }})
+          </p>
           {% if current_filenames %}
             <p class="source-list"><strong>Zusätzliche IST-Dateien:</strong> {{ current_filenames|join(', ') }}</p>
           {% elif meta.current_sources %}
@@ -122,13 +156,46 @@
       <section class="empty">
         <div class="empty-icon">XL</div>
         <h2>Noch keine Datei analysiert</h2>
-        <p>Die Verarbeitung erfolgt direkt beim Upload. Es werden keine Lagerdaten dauerhaft gespeichert.</p>
+        <p>Die Verarbeitung erfolgt direkt beim Upload. Excel-Dateien und Ergebnisse werden nicht dauerhaft gespeichert.</p>
       </section>
     {% endif %}
   </main>
 
 <script>
 (() => {
+  const form = document.getElementById('analysisForm');
+  if (form) {
+    const storageKey = 'lagerhaltungsdaten.analysisSettings.v1';
+    const fields = {
+      months_average: document.getElementById('monthsAverage'),
+      analysis_start_date: document.getElementById('analysisStartDate'),
+      analysis_end_date: document.getElementById('analysisEndDate')
+    };
+    const saveSettings = () => {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify({
+          months_average: fields.months_average.value,
+          analysis_start_date: fields.analysis_start_date.value,
+          analysis_end_date: fields.analysis_end_date.value
+        }));
+      } catch (_) {}
+    };
+    if (form.dataset.settingsSubmitted !== 'true') {
+      try {
+        const saved = JSON.parse(localStorage.getItem(storageKey) || '{}');
+        Object.entries(fields).forEach(([key, element]) => {
+          if (saved[key] !== undefined && saved[key] !== null && saved[key] !== '') {
+            element.value = saved[key];
+          }
+        });
+      } catch (_) {}
+    } else {
+      saveSettings();
+    }
+    Object.values(fields).forEach(element => element.addEventListener('change', saveSettings));
+    form.addEventListener('submit', saveSettings);
+  }
+
   const table = document.getElementById('resultsTable');
   if (!table) return;
   const search = document.getElementById('search');
