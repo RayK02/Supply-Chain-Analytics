@@ -29,7 +29,10 @@ def create_app(test_config: dict | None = None) -> Flask:
     if not secret_key:
         secret_key = secrets.token_urlsafe(32) if is_vercel else "local-only-change-me"
 
-    auth_default = "1" if is_vercel else "0"
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_anon_key = os.environ.get("SUPABASE_ANON_KEY", "")
+    auth_configured = bool(supabase_url and supabase_anon_key)
+    auth_default = "1" if is_vercel and auth_configured else "0"
     secure_cookie_default = "1" if is_vercel else "0"
 
     app = Flask(__name__)
@@ -40,8 +43,8 @@ def create_app(test_config: dict | None = None) -> Flask:
         UPLOAD_DIR=str(upload_dir),
         MAX_CONTENT_LENGTH=25 * 1024 * 1024,
         AUTH_REQUIRED=os.environ.get("TRACKER_AUTH_REQUIRED", auth_default) == "1",
-        SUPABASE_URL=os.environ.get("SUPABASE_URL", ""),
-        SUPABASE_ANON_KEY=os.environ.get("SUPABASE_ANON_KEY", ""),
+        SUPABASE_URL=supabase_url,
+        SUPABASE_ANON_KEY=supabase_anon_key,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("TRACKER_SECURE_COOKIES", secure_cookie_default) == "1",
