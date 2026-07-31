@@ -77,8 +77,10 @@ def calculate_analysis(
     dates = [day for _, day, _ in valid_sales]
     data_start = min(dates) if dates else None
     data_end = max(dates) if dates else None
-    analysis_start = _parameter_date(params, "analysis_start_date") or data_start
-    analysis_end = _parameter_date(params, "analysis_end_date") or data_end
+    requested_start = _parameter_date(params, "analysis_start_date")
+    requested_end = _parameter_date(params, "analysis_end_date")
+    analysis_start = requested_start or data_start
+    analysis_end = requested_end or data_end
     if analysis_start and analysis_end and analysis_start > analysis_end:
         raise ValueError("Das Startdatum darf nicht nach dem Enddatum liegen.")
 
@@ -216,14 +218,14 @@ def calculate_analysis(
         warnings.append("Die ABC-Analyse enthält keine C-Artikel.")
     if results and counts["A"] == len(results):
         warnings.append("Die ABC-Analyse enthält nur A-Artikel; Grenzwerte oder Datenbasis prüfen.")
-    if average_start and analysis_start and analysis_start > average_start:
+    if average_start and requested_start and requested_start > average_start:
         warnings.append(
-            "Der Analysebeginn liegt innerhalb des Durchschnittsfensters. "
+            "Der gewählte Analysebeginn liegt innerhalb des Durchschnittsfensters. "
             "Der davorliegende Teil wird als Absatz 0 berücksichtigt."
         )
-    elif average_start and data_start and data_start > average_start:
+    elif average_start and data_start and (data_start.year, data_start.month) > (average_start.year, average_start.month):
         warnings.append(
-            "Die Quelldaten beginnen nach dem Start des Durchschnittsfensters. "
+            "Die Quelldaten beginnen nach dem ersten benötigten Durchschnittsmonat. "
             "Fehlende frühere Monate werden als Absatz 0 berücksichtigt."
         )
     if analysis_end and data_end and analysis_end > data_end:
