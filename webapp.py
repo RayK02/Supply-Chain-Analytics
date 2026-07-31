@@ -158,11 +158,7 @@ def analyze():
             export_filename=filename,
             source_filename=analysis_file.filename,
             current_filenames=[uploaded.filename for uploaded in current_uploads],
-            analysis_settings={
-                "months_average": meta.get("months_average", display_settings["months_average"]),
-                "analysis_start_date": meta["analysis_start"].isoformat() if meta.get("analysis_start") else "",
-                "analysis_end_date": meta["analysis_end"].isoformat() if meta.get("analysis_end") else "",
-            },
+            analysis_settings=display_settings,
             settings_submitted=True,
         )
     except Exception as exc:
@@ -179,12 +175,7 @@ def too_large(_error):
     return _render_index(
         error="Die hochgeladenen Dateien sind zusammen grösser als 60 MB.",
         status=413,
-        analysis_settings={
-            "months_average": request.form.get("months_average", "3"),
-            "analysis_start_date": request.form.get("analysis_start_date", ""),
-            "analysis_end_date": request.form.get("analysis_end_date", ""),
-        },
-        settings_submitted=True,
+        settings_submitted=False,
     )
 
 
