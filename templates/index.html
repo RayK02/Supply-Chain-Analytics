@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lagerhaltungsdaten Analyse</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-inner">
+      <p class="eyebrow">SUPPLY CHAIN ANALYTICS</p>
+      <h1>Lagerhaltungsdaten</h1>
+      <p>Excel hochladen, ABC/XYZ berechnen, Mindestbestände und Bestellmengen vergleichen und als XLSX exportieren.</p>
+    </div>
+  </header>
+
+  <main class="shell">
+    <section class="panel upload-panel">
+      <div>
+        <h2>Arbeitsmappe analysieren</h2>
+        <p>Erwartete Blätter: Artikelposten, Artikel_Stamm, Lagerhaltungsdaten_IST, VPE und optional Parameter.</p>
+      </div>
+      <form action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data" class="upload-form">
+        <input type="file" name="file" accept=".xlsx" required>
+        <button type="submit">Analyse starten</button>
+      </form>
+    </section>
+
+    {% if error %}<div class="message error">{{ error }}</div>{% endif %}
+
+    {% if results %}
+      <section class="result-head">
+        <div>
+          <p class="eyebrow">ANALYSE ABGESCHLOSSEN</p>
+          <h2>{{ source_filename }}</h2>
+          <p>Stichtag: {{ meta.stichtag.strftime('%d.%m.%Y') if meta.stichtag else '–' }} · {{ results|length }} Artikel</p>
+        </div>
+        <a class="download" href="{{ export_uri }}" download="{{ export_filename }}">XLSX herunterladen</a>
+      </section>
+
+      <section class="kpis">
+        <article><span>Artikel</span><strong>{{ results|length }}</strong></article>
+        <article class="abc a"><span>A-Artikel</span><strong>{{ meta.counts.get('A', 0) }}</strong></article>
+        <article class="abc b"><span>B-Artikel</span><strong>{{ meta.counts.get('B', 0) }}</strong></article>
+        <article class="abc c"><span>C-Artikel</span><strong>{{ meta.counts.get('C', 0) }}</strong></article>
+        <article><span>Änderungen</span><strong>{{ results|selectattr('overall_status', 'equalto', 'change')|list|length }}</strong></article>
+      </section>
+
+      {% if meta.warnings %}
+      <section class="message warning">
+        <strong>Prüfhinweise</strong>
+        <ul>{% for warning in meta.warnings %}<li>{{ warning }}</li>{% endfor %}</ul>
+      </section>
+      {% endif %}
+
+      <section class="panel filters">
+        <label>Suche<input id="search" type="search" placeholder="Artikelnummer oder Beschreibung"></label>
+        <label>ABC<select id="abc"><option value="">Alle</option><option>A</option><option>B</option><option>C</option></select></label>
+        <label>XYZ<select id="xyz"><option value="">Alle</option><option>X</option><option>Y</option><option>Z</option><option value="–">Ohne Klasse</option></select></label>
+        <label>Status<select id="status"><option value="">Alle</option><option value="change">Anpassen</option><option value="ok">OK</option><option value="manual">Manuell prüfen</option></select></label>
+        <button id="resetFilters" type="button" class="secondary">Filter zurücksetzen</button>
+      </section>
+
+      <section class="table-card">
+        <div class="table-scroll">
+          <table id="resultsTable">
+            <thead><tr>
+              <th>Artikel</th><th>Beschreibung</th><th>ABC</th><th>XYZ</th><th>ABCXYZ</th>
+              <th>Absatz gesamt</th><th>Ø Monat</th><th>Mindestbestand neu</th><th>Mindestbestand IST</th><th>Δ</th>
+              <th>Bestellmenge neu</th><th>Bestellmenge IST</th><th>Δ</th><th>VPE</th><th>Lagerort</th><th>Status</th>
+            </tr></thead>
+            <tbody>
+            {% for row in results %}
+              <tr data-search="{{ (row.article_key ~ ' ' ~ row.description)|lower }}" data-abc="{{ row.abc_class }}" data-xyz="{{ row.xyz_class }}" data-status="{{ row.overall_status }}">
+                <td class="mono">{{ row.article_key }}</td>
+                <td>{{ row.description }}</td>
+                <td><span class="pill abc-{{ row.abc_class|lower }}">{{ row.abc_class }}</span></td>
+                <td><span class="pill xyz">{{ row.xyz_class }}</span></td>
+                <td><strong>{{ row.abcxyz }}</strong></td>
+                <td>{{ '%.0f'|format(row.sales_total) }}</td>
+                <td>{{ '%.1f'|format(row.average_month) }}</td>
+                <td>{{ row.minimum_stock }}</td>
+                <td>{{ '%.0f'|format(row.minimum_stock_current) if row.minimum_stock_current is not none else '–' }}</td>
+                <td class="delta {{ 'positive' if row.minimum_stock_delta is not none and row.minimum_stock_delta > 0 else 'negative' if row.minimum_stock_delta is not none and row.minimum_stock_delta < 0 else '' }}">{{ '%+.0f'|format(row.minimum_stock_delta) if row.minimum_stock_delta is not none else '–' }}</td>
+                <td>{{ row.order_quantity }}</td>
+                <td>{{ '%.0f'|format(row.order_quantity_current) if row.order_quantity_current is not none else '–' }}</td>
+                <td class="delta {{ 'positive' if row.order_quantity_delta is not none and row.order_quantity_delta > 0 else 'negative' if row.order_quantity_delta is not none and row.order_quantity_delta < 0 else '' }}">{{ '%+.0f'|format(row.order_quantity_delta) if row.order_quantity_delta is not none else '–' }}</td>
+                <td>{{ '%.0f'|format(row.vpe) if row.vpe is not none else '–' }}</td>
+                <td>{{ row.location or '–' }}</td>
+                <td><span class="status {{ row.overall_status }}">{{ 'OK' if row.overall_status == 'ok' else 'Anpassen' if row.overall_status == 'change' else 'Manuell prüfen' }}</span></td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p id="visibleCount" class="count"></p>
+      </section>
+    {% else %}
+      <section class="empty">
+        <div class="empty-icon">XL</div>
+        <h2>Noch keine Datei analysiert</h2>
+        <p>Die Verarbeitung erfolgt direkt beim Upload. Es werden keine Lagerdaten dauerhaft gespeichert.</p>
+      </section>
+    {% endif %}
+  </main>
+
+<script>
+(() => {
+  const table = document.getElementById('resultsTable');
+  if (!table) return;
+  const search = document.getElementById('search');
+  const abc = document.getElementById('abc');
+  const xyz = document.getElementById('xyz');
+  const status = document.getElementById('status');
+  const count = document.getElementById('visibleCount');
+  const rows = [...table.tBodies[0].rows];
+  const apply = () => {
+    const term = search.value.trim().toLowerCase();
+    let visible = 0;
+    rows.forEach(row => {
+      const show = (!term || row.dataset.search.includes(term)) && (!abc.value || row.dataset.abc === abc.value) && (!xyz.value || row.dataset.xyz === xyz.value) && (!status.value || row.dataset.status === status.value);
+      row.hidden = !show;
+      if (show) visible++;
+    });
+    count.textContent = `${visible} von ${rows.length} Artikeln angezeigt`;
+  };
+  [search, abc, xyz, status].forEach(element => element.addEventListener('input', apply));
+  document.getElementById('resetFilters').addEventListener('click', () => { search.value=''; abc.value=''; xyz.value=''; status.value=''; apply(); });
+  apply();
+})();
+</script>
+</body>
+</html>
