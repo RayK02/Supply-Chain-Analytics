@@ -17,7 +17,7 @@ Web-App zur Analyse der Excel-Arbeitsmappe `Lagerhaltungsdaten`.
 ```bash
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt
-.venv/Scripts/python app.py
+.venv/Scripts/python webapp.py
 ```
 
 Danach `http://127.0.0.1:5050` öffnen.

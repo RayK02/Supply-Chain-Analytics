@@ -2,9 +2,8 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
     "api/index.py": {
-      "runtime": "python3.12",
       "maxDuration": 60,
-      "includeFiles": "{templates/**,static/**,app.py,inventory.py}"
+      "includeFiles": "{templates/**,static/**,webapp.py,inventory.py,app/**}"
     }
   },
   "rewrites": [{ "source": "/(.*)", "destination": "/api/index.py" }]

@@ -3,7 +3,7 @@ from io import BytesIO
 
 from openpyxl import Workbook, load_workbook
 
-from app import app
+from webapp import app
 from app.inventory_analysis import calculate_analysis
 from app.inventory_utils import normalize_article_key, round_up_to_vpe
 from inventory import analyse_workbook, build_export
