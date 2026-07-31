@@ -11,18 +11,27 @@
     <div class="hero-inner">
       <p class="eyebrow">SUPPLY CHAIN ANALYTICS</p>
       <h1>Lagerhaltungsdaten</h1>
-      <p>Excel hochladen, ABC/XYZ berechnen, Mindestbestände und Bestellmengen vergleichen und als XLSX exportieren.</p>
+      <p>Absatzdaten analysieren, aktuelle Lagerhaltungsdaten ergänzen, ABC/XYZ berechnen und die Vorschläge als XLSX exportieren.</p>
     </div>
   </header>
 
   <main class="shell">
-    <section class="panel upload-panel">
+    <section class="panel upload-panel stacked">
       <div>
-        <h2>Arbeitsmappe analysieren</h2>
-        <p>Erwartete Blätter: Artikelposten, Artikel_Stamm, Lagerhaltungsdaten_IST, VPE und optional Parameter.</p>
+        <h2>Arbeitsmappen analysieren</h2>
+        <p>Die Analyse-Datei liefert Artikelposten, Artikelstamm und VPE. Zusätzliche IST-Dateien liefern die aktuellsten Lagerhaltungsdaten.</p>
       </div>
-      <form action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data" class="upload-form">
-        <input type="file" name="file" accept=".xlsx" required>
+      <form action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data" class="upload-form upload-grid">
+        <label class="file-field">
+          <strong>1. Analyse-Arbeitsmappe</strong>
+          <span>Erforderlich: Artikelposten; optional Artikel_Stamm, VPE, Parameter und Lagerhaltungsdaten_IST.</span>
+          <input type="file" name="analysis_file" accept=".xlsx" required>
+        </label>
+        <label class="file-field">
+          <strong>2. Aktuelle Lagerhaltungsdaten</strong>
+          <span>Optional, mehrere Dateien möglich. Erwartet z. B. Lagerhaltungsdatenübersicht mit Artikelnr., Lagerbestand, Minimalbestand, Bestellmenge und Maximalbestand.</span>
+          <input type="file" name="current_files" accept=".xlsx" multiple>
+        </label>
         <button type="submit">Analyse starten</button>
       </form>
     </section>
@@ -35,15 +44,23 @@
           <p class="eyebrow">ANALYSE ABGESCHLOSSEN</p>
           <h2>{{ source_filename }}</h2>
           <p>Stichtag: {{ meta.stichtag.strftime('%d.%m.%Y') if meta.stichtag else '–' }} · {{ results|length }} Artikel</p>
+          {% if current_filenames %}
+            <p class="source-list"><strong>Zusätzliche IST-Dateien:</strong> {{ current_filenames|join(', ') }}</p>
+          {% elif meta.current_sources %}
+            <p class="source-list">IST-Werte stammen aus der Analyse-Arbeitsmappe.</p>
+          {% else %}
+            <p class="source-list warning-text">Keine IST-Lagerhaltungsdaten erkannt.</p>
+          {% endif %}
         </div>
         <a class="download" href="{{ export_uri }}" download="{{ export_filename }}">XLSX herunterladen</a>
       </section>
 
-      <section class="kpis">
+      <section class="kpis six">
         <article><span>Artikel</span><strong>{{ results|length }}</strong></article>
         <article class="abc a"><span>A-Artikel</span><strong>{{ meta.counts.get('A', 0) }}</strong></article>
         <article class="abc b"><span>B-Artikel</span><strong>{{ meta.counts.get('B', 0) }}</strong></article>
         <article class="abc c"><span>C-Artikel</span><strong>{{ meta.counts.get('C', 0) }}</strong></article>
+        <article><span>IST-Artikel</span><strong>{{ meta.current_articles or 0 }}</strong></article>
         <article><span>Änderungen</span><strong>{{ results|selectattr('overall_status', 'equalto', 'change')|list|length }}</strong></article>
       </section>
 
@@ -58,7 +75,7 @@
         <label>Suche<input id="search" type="search" placeholder="Artikelnummer oder Beschreibung"></label>
         <label>ABC<select id="abc"><option value="">Alle</option><option>A</option><option>B</option><option>C</option></select></label>
         <label>XYZ<select id="xyz"><option value="">Alle</option><option>X</option><option>Y</option><option>Z</option><option value="–">Ohne Klasse</option></select></label>
-        <label>Status<select id="status"><option value="">Alle</option><option value="change">Anpassen</option><option value="ok">OK</option><option value="manual">Manuell prüfen</option></select></label>
+        <label>Status<select id="status"><option value="">Alle</option><option value="change">Anpassen</option><option value="ok">OK</option><option value="manual">Manuell prüfen</option><option value="missing">IST fehlt</option></select></label>
         <button id="resetFilters" type="button" class="secondary">Filter zurücksetzen</button>
       </section>
 
@@ -67,8 +84,10 @@
           <table id="resultsTable">
             <thead><tr>
               <th>Artikel</th><th>Beschreibung</th><th>ABC</th><th>XYZ</th><th>ABCXYZ</th>
-              <th>Absatz gesamt</th><th>Ø Monat</th><th>Mindestbestand neu</th><th>Mindestbestand IST</th><th>Δ</th>
-              <th>Bestellmenge neu</th><th>Bestellmenge IST</th><th>Δ</th><th>VPE</th><th>Lagerort</th><th>Status</th>
+              <th>Absatz gesamt</th><th>Ø Monat</th><th>Lagerbestand IST</th>
+              <th>Mindestbestand neu</th><th>Minimalbestand IST</th><th>Δ</th>
+              <th>Bestellmenge neu</th><th>Bestellmenge IST</th><th>Δ</th>
+              <th>Maximalbestand IST</th><th>VPE</th><th>Lagerort</th><th>IST-Quelle</th><th>Status</th>
             </tr></thead>
             <tbody>
             {% for row in results %}
@@ -80,15 +99,18 @@
                 <td><strong>{{ row.abcxyz }}</strong></td>
                 <td>{{ '%.0f'|format(row.sales_total) }}</td>
                 <td>{{ '%.1f'|format(row.average_month) }}</td>
-                <td>{{ row.minimum_stock }}</td>
+                <td>{{ '%.0f'|format(row.stock_current) if row.stock_current is not none else '–' }}</td>
+                <td>{{ row.minimum_stock if row.minimum_stock is not none else '–' }}</td>
                 <td>{{ '%.0f'|format(row.minimum_stock_current) if row.minimum_stock_current is not none else '–' }}</td>
                 <td class="delta {{ 'positive' if row.minimum_stock_delta is not none and row.minimum_stock_delta > 0 else 'negative' if row.minimum_stock_delta is not none and row.minimum_stock_delta < 0 else '' }}">{{ '%+.0f'|format(row.minimum_stock_delta) if row.minimum_stock_delta is not none else '–' }}</td>
-                <td>{{ row.order_quantity }}</td>
+                <td>{{ row.order_quantity if row.order_quantity is not none else '–' }}</td>
                 <td>{{ '%.0f'|format(row.order_quantity_current) if row.order_quantity_current is not none else '–' }}</td>
                 <td class="delta {{ 'positive' if row.order_quantity_delta is not none and row.order_quantity_delta > 0 else 'negative' if row.order_quantity_delta is not none and row.order_quantity_delta < 0 else '' }}">{{ '%+.0f'|format(row.order_quantity_delta) if row.order_quantity_delta is not none else '–' }}</td>
+                <td>{{ '%.0f'|format(row.maximum_stock_current) if row.maximum_stock_current is not none else '–' }}</td>
                 <td>{{ '%.0f'|format(row.vpe) if row.vpe is not none else '–' }}</td>
                 <td>{{ row.location or '–' }}</td>
-                <td><span class="status {{ row.overall_status }}">{{ 'OK' if row.overall_status == 'ok' else 'Anpassen' if row.overall_status == 'change' else 'Manuell prüfen' }}</span></td>
+                <td title="{{ row.current_source_file }}">{{ row.current_source_file or '–' }}</td>
+                <td><span class="status {{ row.overall_status }}">{{ 'OK' if row.overall_status == 'ok' else 'Anpassen' if row.overall_status == 'change' else 'Manuell prüfen' if row.overall_status == 'manual' else 'IST fehlt' }}</span></td>
               </tr>
             {% endfor %}
             </tbody>
