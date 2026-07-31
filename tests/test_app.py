@@ -9,10 +9,16 @@ from app.inventory_utils import normalize_article_key, round_up_to_vpe
 from inventory import analyse_workbook, build_export
 
 
-def test_article_normalization():
+def test_article_normalization_preserves_erp_identifiers():
     assert normalize_article_key(602) == "000602"
-    assert normalize_article_key("100602.0") == "100602"
-    assert normalize_article_key("ABC") is None
+    assert normalize_article_key(100602.0) == "100602"
+    assert normalize_article_key("ABC") == "ABC"
+    assert normalize_article_key("ART-991202") == "ART-991202"
+    assert normalize_article_key("10.9912") == "10.9912"
+    assert normalize_article_key("991204-A") == "991204-A"
+    assert normalize_article_key("X99") == "X99"
+    assert normalize_article_key("1e6") == "1E6"
+    assert normalize_article_key(991207.5) is None
 
 
 def test_vpe_rounding():
@@ -22,10 +28,10 @@ def test_vpe_rounding():
 
 def test_abcxyz_calculation():
     rows = [
-        {"article_key": "100001", "booking_date": date(2026, 1, 10), "document_type": "Verkaufslieferung", "quantity": -80},
-        {"article_key": "100001", "booking_date": date(2026, 2, 10), "document_type": "Verkaufslieferung", "quantity": -80},
-        {"article_key": "100001", "booking_date": date(2026, 3, 10), "document_type": "Verkaufslieferung", "quantity": -80},
-        {"article_key": "100002", "booking_date": date(2026, 3, 10), "document_type": "Verkaufslieferung", "quantity": -20},
+        {"article_key": "100001", "booking_date": date(2026, 1, 31), "document_type": "Verkaufslieferung", "quantity": -80},
+        {"article_key": "100001", "booking_date": date(2026, 2, 28), "document_type": "Verkaufslieferung", "quantity": -80},
+        {"article_key": "100001", "booking_date": date(2026, 3, 31), "document_type": "Verkaufslieferung", "quantity": -80},
+        {"article_key": "100002", "booking_date": date(2026, 3, 31), "document_type": "Verkaufslieferung", "quantity": -20},
     ]
     results, meta = calculate_analysis(rows, vpe_by_article={"100001": 20})
     by_key = {row["article_key"]: row for row in results}
@@ -40,8 +46,8 @@ def sample_workbook():
     ws = wb.active
     ws.title = "Artikelposten"
     ws.append(["Artikelnummer", "Beschreibung", "Buchungsdatum", "Belegart", "Menge"])
-    for month, qty in ((1, -10), (2, -12), (3, -11)):
-        ws.append([100001, "Testartikel", date(2026, month, 5), "Verkaufslieferung", qty])
+    for month, day, qty in ((1, 31, -10), (2, 28, -12), (3, 31, -11)):
+        ws.append([100001, "Testartikel", date(2026, month, day), "Verkaufslieferung", qty])
     master = wb.create_sheet("Artikel_Stamm")
     master.append(["Artikelnummer", "Beschreibung"])
     master.append([100001, "Testartikel"])
@@ -64,11 +70,27 @@ def test_workbook_analysis_and_export():
     assert results[0]["vpe"] == 10
     exported = build_export(results, meta)
     workbook = load_workbook(BytesIO(exported), data_only=True)
-    assert workbook.sheetnames == ["ABC_Analyse", "Zusammenfassung", "Parameter"]
+    assert workbook.sheetnames == [
+        "ABC_Analyse",
+        "Zusammenfassung",
+        "IST_Quellen",
+        "Importbericht",
+        "Parameter",
+    ]
+
+
+def test_export_neutralizes_formula_injection():
+    results, meta = analyse_workbook(sample_workbook())
+    results[0]["description"] = '=HYPERLINK("https://example.invalid","Öffnen")'
+    exported = build_export(results, meta)
+    workbook = load_workbook(BytesIO(exported), data_only=False)
+    assert workbook["ABC_Analyse"]["B2"].value.startswith("'=")
+    assert workbook["ABC_Analyse"]["B2"].data_type == "s"
 
 
 def test_health_and_invalid_upload():
     client = app.test_client()
     assert client.get("/health").status_code == 200
+    assert client.get("/analyze").status_code == 303
     assert client.post("/analyze", data={}).status_code == 400
     assert client.post("/analyze", data={"file": (BytesIO(b"x"), "test.csv")}, content_type="multipart/form-data").status_code == 400

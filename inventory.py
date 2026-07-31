@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import re
+import zipfile
 from datetime import date, datetime
 from typing import Any, BinaryIO, Iterable
 
@@ -10,7 +11,6 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from app.inventory_analysis import calculate_analysis
 from app.inventory_utils import DEFAULT_PARAMETERS, as_float, normalize_article_key, parse_code_set
 
 SHEETS = {
@@ -23,7 +23,7 @@ SHEETS = {
 }
 
 ALIASES = {
-    "article": ["Artikelnummer", "Artikelnr.", "Artikelnr", "Artikel-Nr.", "Nr.", "Nr", "Item No."],
+    "article": ["Artikelnummer", "Artikelnr.", "Artikelnr", "Artikel-Nr.", "Nr.", "Nr", "Item No.", "Item No"],
     "variant": ["Variantencode", "Variant Code"],
     "procurement": ["Beschaffungsmethode", "Replenishment System", "Procurement Method"],
     "description": ["Beschreibung", "Artikelbeschreibung", "Description"],
@@ -31,17 +31,55 @@ ALIASES = {
     "type": ["Belegart", "Document Type"],
     "qty": ["Menge", "Quantity"],
     "location": ["Lagerortcode", "Lagerort", "Location Code"],
-    "vpe": ["VPE", "Verpackungseinheit", "Menge je VPE"],
+    "vpe": ["VPE", "Verpackungseinheit", "Menge je VPE", "Qty. per Unit of Measure"],
     "stock": ["Lagerbestand", "Bestand", "Inventory", "Current Inventory"],
     "minimum": ["Mindestbestand", "Minimalbestand", "Minimum Inventory", "Sicherheitsbestand"],
-    "order": ["Bestellmenge", "Order Quantity", "Bestelllosgröße"],
+    "order": ["Bestellmenge", "Order Quantity", "Bestelllosgröße", "Bestelllosgroesse"],
     "maximum": ["Maximalbestand", "Maximum Inventory"],
 }
+
+MAX_SHEET_ROWS = 100_000
+MAX_ZIP_ENTRIES = 500
+MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
+MAX_COMPRESSION_RATIO = 200
+EMBEDDED_IST_SHEETS = {SHEETS["current_export"], SHEETS["current"]}
 
 
 def canon(value: Any) -> str:
     text = str(value or "").strip().lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
     return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def _rewind(file_object: BinaryIO) -> None:
+    try:
+        file_object.seek(0)
+    except (AttributeError, OSError):
+        pass
+
+
+def validate_xlsx_archive(file_object: BinaryIO, filename: str = "Arbeitsmappe") -> None:
+    """Reject malformed, encrypted or resource-amplifying XLSX archives."""
+
+    _rewind(file_object)
+    try:
+        with zipfile.ZipFile(file_object) as archive:
+            entries = archive.infolist()
+            if len(entries) > MAX_ZIP_ENTRIES:
+                raise ValueError(f"{filename}: Zu viele Bestandteile in der XLSX-Datei.")
+            total_uncompressed = sum(entry.file_size for entry in entries)
+            if total_uncompressed > MAX_UNCOMPRESSED_BYTES:
+                raise ValueError(f"{filename}: Entpackter Inhalt ist zu gross.")
+            for entry in entries:
+                if entry.flag_bits & 0x1:
+                    raise ValueError(f"{filename}: Verschlüsselte XLSX-Dateien werden nicht unterstützt.")
+                if entry.compress_size > 0 and entry.file_size > 1_000_000:
+                    ratio = entry.file_size / entry.compress_size
+                    if ratio > MAX_COMPRESSION_RATIO:
+                        raise ValueError(f"{filename}: Ungewöhnlich hohe ZIP-Kompression erkannt.")
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"{filename}: Keine gültige XLSX-Datei.") from exc
+    finally:
+        _rewind(file_object)
 
 
 def sheet(workbook, name: str, required: bool = True) -> str | None:
@@ -51,32 +89,44 @@ def sheet(workbook, name: str, required: bool = True) -> str | None:
     return found
 
 
-def rows(workbook, name: str) -> tuple[list[str], list[dict[str, Any]]]:
+def rows(workbook, name: str, max_rows: int = MAX_SHEET_ROWS) -> tuple[list[str], list[dict[str, Any]]]:
     worksheet = workbook[name]
     iterator = worksheet.iter_rows(values_only=True)
     try:
         raw_headers = next(iterator)
     except StopIteration:
         return [], []
-    headers = [str(value).strip() if value is not None else f"Spalte_{index + 1}" for index, value in enumerate(raw_headers)]
-    data = [
-        {headers[index]: row[index] if index < len(row) else None for index in range(len(headers))}
-        for row in iterator
-        if any(value not in (None, "") for value in row)
-    ]
+
+    headers: list[str] = []
+    seen: dict[str, int] = {}
+    for index, value in enumerate(raw_headers):
+        base = str(value).strip() if value is not None else f"Spalte_{index + 1}"
+        count = seen.get(base, 0) + 1
+        seen[base] = count
+        headers.append(base if count == 1 else f"{base}_{count}")
+
+    data: list[dict[str, Any]] = []
+    for row_number, row in enumerate(iterator, start=2):
+        if row_number > max_rows + 1:
+            raise ValueError(f"Tabellenblatt {name} überschreitet {max_rows:,} Datenzeilen.")
+        if not any(value not in (None, "") for value in row):
+            continue
+        data.append({headers[index]: row[index] if index < len(row) else None for index in range(len(headers))})
     return headers, data
 
 
 def col(headers: list[str], key: str, required: bool = True) -> str | None:
+    """Resolve columns by exact canonical aliases only.
+
+    Fuzzy substring matching previously caused `Menge` in Artikelposten to be
+    interpreted as `Bestellmenge`.
+    """
+
     by_canonical = {canon(value): value for value in headers}
     for alias in ALIASES[key]:
-        if canon(alias) in by_canonical:
-            return by_canonical[canon(alias)]
-    for alias in ALIASES[key]:
-        alias_key = canon(alias)
-        for header_key, original in by_canonical.items():
-            if alias_key in header_key or header_key in alias_key:
-                return original
+        found = by_canonical.get(canon(alias))
+        if found:
+            return found
     if required:
         raise ValueError(f"Spalte fehlt: {ALIASES[key][0]}")
     return None
@@ -96,18 +146,34 @@ def as_date(value: Any) -> date | None:
     return None
 
 
+def _parameter_number(value: Any) -> float | None:
+    if isinstance(value, str) and value.strip().endswith("%"):
+        parsed = as_float(value.strip()[:-1])
+        return parsed / 100 if parsed is not None else None
+    return as_float(value)
+
+
 def params(workbook) -> dict[str, Any]:
     output: dict[str, Any] = dict(DEFAULT_PARAMETERS)
     name = sheet(workbook, SHEETS["params"], False)
     if not name:
+        output["_parameter_source"] = "Standardwerte"
+        output["_parameter_recognized"] = ""
+        output["_parameter_ignored"] = ""
         return output
+
     mapping = {
         "belegart": "document_type",
+        "verkaufsbelegart": "document_type",
+        "ruecklaufbelegarten": "return_document_types",
+        "gutschriftbelegarten": "return_document_types",
         "monate": "months_average",
+        "durchschnittsmonate": "months_average",
         "abcagrenze": "abc_a_threshold",
         "abcbgrenze": "abc_b_threshold",
         "xyzxgrenze": "xyz_x_threshold",
         "xyzygrenze": "xyz_y_threshold",
+        "xyzmindestmonate": "xyz_min_months",
         "mindestfaktora": "minimum_factor_a",
         "mindestfaktorb": "minimum_factor_b",
         "mindestfaktorc": "minimum_factor_c",
@@ -116,20 +182,38 @@ def params(workbook) -> dict[str, Any]:
         "bestellintervallc": "order_interval_c",
         "automatischelagerorte": "automatic_locations",
         "manuellelagerorte": "manual_locations",
+        "maximportrows": "max_import_rows",
+        "maximaleimportzeilen": "max_import_rows",
     }
+    text_keys = {"document_type", "return_document_types", "automatic_locations", "manual_locations"}
+    recognized: list[str] = []
+    ignored: list[str] = []
+
     for row in workbook[name].iter_rows(values_only=True):
         if not row or row[0] in (None, ""):
             continue
-        key = mapping.get(canon(row[0]))
+        raw_key = str(row[0]).strip()
+        key = mapping.get(canon(raw_key))
         value = row[1] if len(row) > 1 else None
         if not key:
+            if canon(raw_key) not in {"parameter", "name", "bezeichnung"}:
+                ignored.append(raw_key)
             continue
-        if key in {"document_type", "automatic_locations", "manual_locations"}:
-            output[key] = str(value).strip()
+        if key in text_keys:
+            if value not in (None, ""):
+                output[key] = str(value).strip()
+                recognized.append(raw_key)
         else:
-            parsed = as_float(value)
+            parsed = _parameter_number(value)
             if parsed is not None:
                 output[key] = parsed
+                recognized.append(raw_key)
+            else:
+                ignored.append(raw_key)
+
+    output["_parameter_source"] = f"Excel: {name}"
+    output["_parameter_recognized"] = ", ".join(recognized)
+    output["_parameter_ignored"] = ", ".join(ignored)
     return output
 
 
@@ -164,15 +248,17 @@ def vpe_values(workbook) -> dict[str, float]:
     return output
 
 
-def _current_sheet_candidates(workbook) -> list[str]:
+def _current_sheet_candidates(workbook, *, scan_all_sheets: bool) -> list[str]:
     ordered: list[str] = []
     for preferred in (SHEETS["current_export"], SHEETS["current"]):
         found = sheet(workbook, preferred, False)
         if found and found not in ordered:
             ordered.append(found)
-    for name in workbook.sheetnames:
-        if name not in ordered:
-            ordered.append(name)
+    if scan_all_sheets:
+        excluded = {canon(SHEETS[key]) for key in ("sales", "articles", "vpe", "params")}
+        for name in workbook.sheetnames:
+            if name not in ordered and canon(name) not in excluded:
+                ordered.append(name)
     return ordered
 
 
@@ -190,14 +276,16 @@ def current_values(
     *,
     source_file: str,
     required: bool = False,
+    scan_all_sheets: bool = False,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     automatic = parse_code_set(parameters.get("automatic_locations"))
     manual = parse_code_set(parameters.get("manual_locations"))
     output: dict[str, dict[str, Any]] = {}
     recognized_sheets: list[str] = []
     parsed_rows = 0
+    invalid_article_rows = 0
 
-    for sheet_name in _current_sheet_candidates(workbook):
+    for sheet_name in _current_sheet_candidates(workbook, scan_all_sheets=scan_all_sheets):
         headers, data = rows(workbook, sheet_name)
         if not headers:
             continue
@@ -220,6 +308,7 @@ def current_values(
         for row in data:
             article_key = normalize_article_key(row.get(article_column))
             if not article_key:
+                invalid_article_rows += 1
                 continue
             location = str(row.get(location_column) or "").strip().upper() if location_column else ""
             priority = _location_priority(location, automatic, manual)
@@ -250,6 +339,7 @@ def current_values(
         "sheets": recognized_sheets,
         "rows": parsed_rows,
         "articles": len(output),
+        "invalid_article_rows": invalid_article_rows,
     }
 
 
@@ -270,7 +360,10 @@ def merge_current_values(
             target[article_key] = value
 
 
-def sales_values(workbook, parameters: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, str]]:
+def sales_values(
+    workbook,
+    parameters: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, Any]]:
     headers, data = rows(workbook, sheet(workbook, SHEETS["sales"]))
     article_column = col(headers, "article")
     description_column = col(headers, "description", False)
@@ -279,22 +372,42 @@ def sales_values(workbook, parameters: dict[str, Any]) -> tuple[list[dict[str, A
     quantity_column = col(headers, "qty")
     output: list[dict[str, Any]] = []
     names: dict[str, str] = {}
+    invalid_article_rows = 0
+    invalid_date_rows = 0
+    invalid_quantity_rows = 0
+
     for row in data:
         article_key = normalize_article_key(row.get(article_column))
         day = as_date(row.get(date_column))
         quantity = as_float(row.get(quantity_column))
         description = str(row.get(description_column) or "").strip() if description_column else ""
+        if not article_key:
+            invalid_article_rows += 1
+            continue
         if article_key and description:
             names.setdefault(article_key, description)
-        if article_key and day and quantity is not None:
-            output.append({
-                "article_key": article_key,
-                "description": description,
-                "booking_date": day,
-                "document_type": str(row.get(type_column) or "").strip(),
-                "quantity": quantity,
-            })
-    return output, names
+        if not day:
+            invalid_date_rows += 1
+            continue
+        if quantity is None:
+            invalid_quantity_rows += 1
+            continue
+        output.append({
+            "article_key": article_key,
+            "description": description,
+            "booking_date": day,
+            "document_type": str(row.get(type_column) or "").strip(),
+            "quantity": quantity,
+        })
+
+    return output, names, {
+        "sheet": SHEETS["sales"],
+        "rows": len(data),
+        "accepted_rows": len(output),
+        "invalid_article_rows": invalid_article_rows,
+        "invalid_date_rows": invalid_date_rows,
+        "invalid_quantity_rows": invalid_quantity_rows,
+    }
 
 
 def compare(current: float | None, proposed: float | None) -> tuple[str, float | None]:
@@ -311,8 +424,15 @@ def _load_current_uploads(
     merged: dict[str, dict[str, Any]] = {}
     infos: list[dict[str, Any]] = []
     for filename, file_object in uploads:
+        validate_xlsx_archive(file_object, filename)
         workbook = load_workbook(file_object, data_only=True, read_only=True)
-        values, info = current_values(workbook, parameters, source_file=filename, required=True)
+        values, info = current_values(
+            workbook,
+            parameters,
+            source_file=filename,
+            required=True,
+            scan_all_sheets=True,
+        )
         merge_current_values(merged, values, override_equal_priority=True)
         infos.append(info)
     return merged, infos
@@ -322,82 +442,10 @@ def analyse_workbook(
     file_object: BinaryIO,
     current_file_objects: Iterable[tuple[str, BinaryIO]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    workbook = load_workbook(file_object, data_only=True, read_only=True)
-    parameters = params(workbook)
-    names = article_names(workbook)
-    vpes = vpe_values(workbook)
-    sales, sales_names = sales_values(workbook, parameters)
-    names = {**sales_names, **names}
+    # Backwards-compatible public function. Import locally to avoid a module cycle.
+    from analysis_service import analyse_workbook as service_analyse_workbook
 
-    current: dict[str, dict[str, Any]] = {}
-    current_sources: list[dict[str, Any]] = []
-    embedded_current, embedded_info = current_values(
-        workbook,
-        parameters,
-        source_file="Analyse-Arbeitsmappe",
-        required=False,
-    )
-    if embedded_info["sheets"]:
-        merge_current_values(current, embedded_current, override_equal_priority=True)
-        current_sources.append(embedded_info)
-
-    external_uploads = list(current_file_objects or [])
-    if external_uploads:
-        external_current, external_infos = _load_current_uploads(external_uploads, parameters)
-        merge_current_values(current, external_current, override_equal_priority=True)
-        current_sources.extend(external_infos)
-
-    for article_key, value in current.items():
-        description = value.get("description_current")
-        if description and not names.get(article_key):
-            names[article_key] = description
-
-    results, meta = calculate_analysis(sales, names, vpes, parameters)
-    matched_current_articles = 0
-    for result in results:
-        current_row = current.get(result["article_key"], {})
-        if current_row:
-            matched_current_articles += 1
-        result.update({
-            "location": current_row.get("location", ""),
-            "manual_review": bool(current_row.get("manual_review")),
-            "stock_current": current_row.get("stock_current"),
-            "minimum_stock_current": current_row.get("minimum_stock_current"),
-            "order_quantity_current": current_row.get("order_quantity_current"),
-            "maximum_stock_current": current_row.get("maximum_stock_current"),
-            "variant_code_current": current_row.get("variant_code_current", ""),
-            "procurement_method_current": current_row.get("procurement_method_current", ""),
-            "current_source_file": current_row.get("current_source_file", ""),
-            "current_source_sheet": current_row.get("current_source_sheet", ""),
-        })
-        result["minimum_stock_status"], result["minimum_stock_delta"] = compare(
-            result["minimum_stock_current"], result["minimum_stock"]
-        )
-        result["order_quantity_status"], result["order_quantity_delta"] = compare(
-            result["order_quantity_current"], result["order_quantity"]
-        )
-        result["xyz_class"] = result["xyz_class"] or "–"
-        result["abcxyz"] = result["abcxyz"] or f'{result["abc_class"]}–'
-        if result["manual_review"]:
-            result["overall_status"] = "manual"
-        elif not current_row:
-            result["overall_status"] = "missing"
-        elif result["minimum_stock_status"] == "ok" and result["order_quantity_status"] == "ok":
-            result["overall_status"] = "ok"
-        else:
-            result["overall_status"] = "change"
-
-    if not results:
-        raise ValueError("Keine auswertbaren Verkaufsabgänge gefunden.")
-
-    for value in current.values():
-        value.pop("_priority", None)
-    meta["parameters"] = parameters
-    meta["current_sources"] = current_sources
-    meta["external_current_files"] = len(external_uploads)
-    meta["current_articles"] = len(current)
-    meta["matched_current_articles"] = matched_current_articles
-    return sorted(results, key=lambda row: (-row["sales_total"], row["article_key"])), meta
+    return service_analyse_workbook(file_object, current_file_objects)
 
 
 EXPORT = [
@@ -406,7 +454,9 @@ EXPORT = [
     ("abc_class", "ABC"),
     ("xyz_class", "XYZ"),
     ("abcxyz", "ABCXYZ"),
-    ("sales_total", "Absatz gesamt"),
+    ("sales_gross", "Bruttoabgang"),
+    ("returns_total", "Rückläufe"),
+    ("sales_total", "Nettoabsatz"),
     ("average_month", "Ø Absatz/Monat"),
     ("stock_current", "Lagerbestand IST"),
     ("minimum_stock", "Mindestbestand Vorschlag"),
@@ -423,8 +473,17 @@ EXPORT = [
     ("variant_code_current", "Variantencode IST"),
     ("procurement_method_current", "Beschaffungsmethode IST"),
     ("current_source_file", "IST-Quelldatei"),
+    ("validation_text", "Plausibilitätsprüfung"),
     ("overall_status", "Status"),
 ]
+
+
+def _excel_safe(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    if value and (value[0] in "=+-@" or value[0] in "\t\r\n"):
+        return "'" + value
+    return value
 
 
 def build_export(results: list[dict[str, Any]], meta: dict[str, Any]) -> bytes:
@@ -433,14 +492,20 @@ def build_export(results: list[dict[str, Any]], meta: dict[str, Any]) -> bytes:
     worksheet.title = "ABC_Analyse"
     worksheet.append([label for _, label in EXPORT])
     for result in results:
-        worksheet.append([result.get(key) for key, _ in EXPORT])
+        worksheet.append([_excel_safe(result.get(key)) for key, _ in EXPORT])
     worksheet.freeze_panes = "A2"
     worksheet.auto_filter.ref = worksheet.dimensions
 
     summary = workbook.create_sheet("Zusammenfassung")
     summary.append(["Kennzahl", "Wert"])
-    summary.append(["Stichtag", meta.get("stichtag")])
-    summary.append(["Gesamtabsatz", meta.get("overall_sales")])
+    summary.append(["Analyse von", meta.get("analysis_start")])
+    summary.append(["Analyse bis", meta.get("analysis_end")])
+    summary.append(["Durchschnitt von", meta.get("average_start")])
+    summary.append(["Durchschnitt bis", meta.get("average_end")])
+    summary.append(["Durchschnittsmonate", meta.get("months_average")])
+    summary.append(["Bruttoabgang", meta.get("overall_gross_sales")])
+    summary.append(["Rückläufe", meta.get("overall_returns")])
+    summary.append(["Nettoabsatz", meta.get("overall_sales")])
     summary.append(["IST-Artikel eingelesen", meta.get("current_articles")])
     summary.append(["IST-Artikel zugeordnet", meta.get("matched_current_articles")])
     summary.append(["Zusätzliche IST-Dateien", meta.get("external_current_files")])
@@ -448,19 +513,27 @@ def build_export(results: list[dict[str, Any]], meta: dict[str, Any]) -> bytes:
         summary.append([f"Anzahl {key}", value])
 
     sources = workbook.create_sheet("IST_Quellen")
-    sources.append(["Datei", "Blätter", "Datenzeilen", "Artikel"])
+    sources.append(["Datei", "Blätter", "Datenzeilen", "Artikel", "Ungültige Artikelzeilen"])
     for source in meta.get("current_sources") or []:
         sources.append([
-            source.get("filename"),
-            ", ".join(source.get("sheets") or []),
+            _excel_safe(source.get("filename")),
+            _excel_safe(", ".join(source.get("sheets") or [])),
             source.get("rows"),
             source.get("articles"),
+            source.get("invalid_article_rows"),
         ])
+
+    import_sheet = workbook.create_sheet("Importbericht")
+    import_sheet.append(["Prüfung", "Wert"])
+    for key, value in (meta.get("sales_import") or {}).items():
+        import_sheet.append([key, _excel_safe(value)])
+    for warning in meta.get("warnings") or []:
+        import_sheet.append(["Warnung", _excel_safe(warning)])
 
     parameter_sheet = workbook.create_sheet("Parameter")
     parameter_sheet.append(["Parameter", "Wert"])
     for key, value in (meta.get("parameters") or {}).items():
-        parameter_sheet.append([key, value])
+        parameter_sheet.append([_excel_safe(key), _excel_safe(value)])
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(color="FFFFFF", bold=True)
@@ -471,7 +544,7 @@ def build_export(results: list[dict[str, Any]], meta: dict[str, Any]) -> bytes:
         for cells in current_sheet.columns:
             current_sheet.column_dimensions[get_column_letter(cells[0].column)].width = min(
                 max(max(len(str(cell.value or "")) for cell in cells) + 2, 10),
-                38,
+                45,
             )
 
     output = io.BytesIO()

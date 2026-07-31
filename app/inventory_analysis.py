@@ -14,7 +14,7 @@ from .inventory_utils import (
     normalize_article_key,
     parameter_number,
     round_up_to_vpe,
-    sales_quantity,
+    sales_components,
 )
 
 
@@ -39,6 +39,15 @@ def _month_start(year: int, month: int) -> date:
     return date(year, month, 1)
 
 
+def _month_end(year: int, month: int) -> date:
+    next_year, next_month = month_shift(year, month, 1)
+    return date(next_year, next_month, 1) - date.resolution
+
+
+def _is_month_end(value: date) -> bool:
+    return value == _month_end(value.year, value.month)
+
+
 def calculate_analysis(
     sales_rows: Iterable[Mapping[str, Any]],
     articles: Mapping[str, str] | None = None,
@@ -48,9 +57,14 @@ def calculate_analysis(
     params = {**DEFAULT_PARAMETERS, **dict(parameters or {})}
     rows = list(sales_rows)
     document_type = str(params["document_type"])
+    return_document_types = params.get("return_document_types", "")
     months = int(parameter_number(params, "months_average", 3))
     if not 1 <= months <= 36:
         raise ValueError("Durchschnittsmonate müssen zwischen 1 und 36 liegen.")
+
+    xyz_min_months = int(parameter_number(params, "xyz_min_months", 3))
+    if not 3 <= xyz_min_months <= 36:
+        raise ValueError("XYZ-Mindestmonate müssen zwischen 3 und 36 liegen.")
 
     a_limit = parameter_number(params, "abc_a_threshold", 0.8)
     b_limit = parameter_number(params, "abc_b_threshold", 0.95)
@@ -62,7 +76,7 @@ def calculate_analysis(
         raise ValueError("XYZ-Grenzen müssen 0 <= X < Y erfüllen.")
 
     names = dict(articles or {})
-    valid_sales: list[tuple[str, date, float]] = []
+    movements: list[tuple[str, date, float, float, float]] = []
     for row in rows:
         key = normalize_article_key(row.get("article_key") or row.get("article_no"))
         if not key:
@@ -70,11 +84,11 @@ def calculate_analysis(
         if row.get("description") and not names.get(key):
             names[key] = str(row["description"]).strip()
         day = booking_date(row)
-        quantity = sales_quantity(row, document_type)
-        if day is not None and quantity > 0:
-            valid_sales.append((key, day, quantity))
+        gross, returned, net = sales_components(row, document_type, return_document_types)
+        if day is not None and (gross or returned or net):
+            movements.append((key, day, gross, returned, net))
 
-    dates = [day for _, day, _ in valid_sales]
+    dates = [day for _, day, _, _, _ in movements]
     data_start = min(dates) if dates else None
     data_end = max(dates) if dates else None
     requested_start = _parameter_date(params, "analysis_start_date")
@@ -84,11 +98,20 @@ def calculate_analysis(
     if analysis_start and analysis_end and analysis_start > analysis_end:
         raise ValueError("Das Startdatum darf nicht nach dem Enddatum liegen.")
 
+    # Only fully completed calendar months are used for demand, XYZ and proposals.
+    average_end: date | None = None
     month_keys: list[tuple[int, int]] = []
-    average_start = None
+    average_start: date | None = None
+    partial_month_excluded = False
     if analysis_end:
+        if _is_month_end(analysis_end):
+            average_end = analysis_end
+        else:
+            previous_year, previous_month = month_shift(analysis_end.year, analysis_end.month, -1)
+            average_end = _month_end(previous_year, previous_month)
+            partial_month_excluded = True
         month_keys = [
-            month_shift(analysis_end.year, analysis_end.month, delta)
+            month_shift(average_end.year, average_end.month, delta)
             for delta in range(-(months - 1), 1)
         ]
         first_year, first_month = month_keys[0]
@@ -96,26 +119,35 @@ def calculate_analysis(
     allowed_months = set(month_keys)
 
     total: dict[str, float] = defaultdict(float)
+    gross_total: dict[str, float] = defaultdict(float)
+    returns_total: dict[str, float] = defaultdict(float)
     monthly: dict[str, dict[tuple[int, int], float]] = defaultdict(lambda: defaultdict(float))
+    active_keys: set[str] = set()
     rows_in_analysis = 0
-    for key, day, quantity in valid_sales:
+
+    for key, day, gross, returned, net in movements:
         if analysis_start and day < analysis_start:
             continue
         if analysis_end and day > analysis_end:
             continue
-        total[key] += quantity
+        active_keys.add(key)
+        total[key] += net
+        gross_total[key] += gross
+        returns_total[key] += returned
         rows_in_analysis += 1
         if (day.year, day.month) in allowed_months:
-            monthly[key][(day.year, day.month)] += quantity
+            monthly[key][(day.year, day.month)] += net
 
-    keys = set(names) | set(total) | set(monthly)
-    ranked = sorted(((key, total.get(key, 0)) for key in keys), key=lambda item: (-item[1], item[0]))
+    # Master-data-only articles must not create phantom rows in the ABC analysis.
+    keys = active_keys
+    ranked = sorted(
+        ((key, max(total.get(key, 0.0), 0.0)) for key in keys),
+        key=lambda item: (-item[1], item[0]),
+    )
     grand_total = sum(value for _, value in ranked)
     cumulative = 0.0
     abc: dict[str, tuple[str, float, float]] = {}
 
-    # Die Klasse richtet sich nach dem kumulierten Anteil VOR dem aktuellen Artikel.
-    # Dadurch bleibt der umsatzstärkste Artikel A, auch wenn er die A-Grenze alleine überschreitet.
     for key, amount in ranked:
         share = amount / grand_total if grand_total else 0.0
         previous_cumulative = cumulative
@@ -141,18 +173,22 @@ def calculate_analysis(
 
     results: list[dict[str, Any]] = []
     for key in sorted(keys):
-        klass, share, cumulative_share = abc.get(key, ("C", 0, 1 if grand_total else 0))
-        values = [monthly[key].get(month_key, 0) for month_key in month_keys] if month_keys else []
+        klass, share, cumulative_share = abc.get(key, ("C", 0.0, 1.0 if grand_total else 0.0))
+        values = [monthly[key].get(month_key, 0.0) for month_key in month_keys] if month_keys else []
         recent_sales = sum(values)
-        average_month = recent_sales / months
-        xyz_average = average_month
+        average_month = recent_sales / months if months else 0.0
         deviation = pstdev(values) if values else 0.0
-        if xyz_average <= 0:
+
+        if months < xyz_min_months:
             variation = None
             xyz = None
-            xyz_reason = "Keine Absatzdaten im gewählten Durchschnittszeitraum."
+            xyz_reason = f"XYZ benötigt mindestens {xyz_min_months} Durchschnittsmonate."
+        elif average_month <= 0:
+            variation = None
+            xyz = None
+            xyz_reason = "Kein positiver Nettoabsatz im gewählten Durchschnittszeitraum."
         else:
-            variation = deviation / xyz_average
+            variation = deviation / average_month
             xyz = "X" if variation <= x_limit else ("Y" if variation <= y_limit else "Z")
             xyz_reason = None
 
@@ -160,7 +196,7 @@ def calculate_analysis(
         minimum = math.ceil(average_month * factor) if average_month > 0 and factor >= 0 else None
         weekly = average_month * 12 / 52
         interval = intervals[klass]
-        raw_order = weekly * interval if weekly > 0 and interval >= 0 else 0
+        raw_order = weekly * interval if weekly > 0 and interval >= 0 else 0.0
         vpe = None
         if vpe_by_article and key in vpe_by_article:
             raw = vpe_by_article[key]
@@ -176,9 +212,11 @@ def calculate_analysis(
             "analysis_start": analysis_start,
             "analysis_end": analysis_end,
             "average_start": average_start,
-            "average_end": analysis_end,
+            "average_end": average_end,
             "months_average": months,
-            "sales_total": total.get(key, 0),
+            "sales_gross": gross_total.get(key, 0.0),
+            "returns_total": returns_total.get(key, 0.0),
+            "sales_total": total.get(key, 0.0),
             "share": share,
             "cumulative_share": cumulative_share,
             "abc_class": klass,
@@ -200,7 +238,7 @@ def calculate_analysis(
             "order_quantity_raw": raw_order,
             "vpe": vpe,
             "order_quantity": order,
-            "proposal_reason": "Kein Verkauf im gewählten Durchschnittszeitraum." if average_month <= 0 else None,
+            "proposal_reason": "Kein positiver Nettoabsatz im vollständigen Durchschnittszeitraum." if average_month <= 0 else None,
         })
 
     counts: dict[str, int] = defaultdict(int)
@@ -218,10 +256,16 @@ def calculate_analysis(
         warnings.append("Die ABC-Analyse enthält keine C-Artikel.")
     if results and counts["A"] == len(results):
         warnings.append("Die ABC-Analyse enthält nur A-Artikel; Grenzwerte oder Datenbasis prüfen.")
+    if months < xyz_min_months:
+        warnings.append(f"Keine XYZ-Klassifizierung: mindestens {xyz_min_months} Durchschnittsmonate erforderlich.")
+    if partial_month_excluded and analysis_end:
+        warnings.append(
+            f"Der angebrochene Monat bis {analysis_end:%d.%m.%Y} wurde für Durchschnitt, XYZ und Vorschläge ausgeschlossen."
+        )
     if average_start and requested_start and requested_start > average_start:
         warnings.append(
             "Der gewählte Analysebeginn liegt innerhalb des Durchschnittsfensters. "
-            "Der davorliegende Teil wird als Absatz 0 berücksichtigt."
+            "Davorliegende vollständige Monate werden als Absatz 0 berücksichtigt."
         )
     elif average_start and data_start and (data_start.year, data_start.month) > (average_start.year, average_start.month):
         warnings.append(
@@ -229,7 +273,7 @@ def calculate_analysis(
             "Fehlende frühere Monate werden als Absatz 0 berücksichtigt."
         )
     if analysis_end and data_end and analysis_end > data_end:
-        warnings.append("Das gewählte Enddatum liegt nach dem letzten vorhandenen Verkaufsabgang.")
+        warnings.append("Das gewählte Enddatum liegt nach der letzten vorhandenen Verkaufsbewegung.")
 
     return results, {
         "stichtag": analysis_end,
@@ -237,12 +281,15 @@ def calculate_analysis(
         "analysis_start": analysis_start,
         "analysis_end": analysis_end,
         "average_start": average_start,
-        "average_end": analysis_end,
+        "average_end": average_end,
         "months_average": months,
         "data_start": data_start,
         "data_end": data_end,
         "rows_in_analysis": rows_in_analysis,
-        "overall_sales": grand_total,
+        "overall_gross_sales": sum(gross_total.values()),
+        "overall_returns": sum(returns_total.values()),
+        "overall_sales": sum(total.values()),
+        "abc_sales_basis": grand_total,
         "counts": dict(counts),
         "warnings": warnings,
     }

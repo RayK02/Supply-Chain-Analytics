@@ -42,9 +42,11 @@ def test_web_form_applies_and_displays_analysis_settings():
     assert response.status_code == 200
     assert "01.03.2026" in text
     assert "30.06.2026" in text
-    assert "2 Kalendermonate" in text
+    assert "2 vollständige Kalendermonate" in text
     assert 'value="2"' in text
     assert "localStorage" in text
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Frame-Options"] == "DENY"
 
 
 def test_web_form_rejects_reversed_dates_and_keeps_values():
@@ -64,3 +66,19 @@ def test_web_form_rejects_reversed_dates_and_keeps_values():
     assert "Startdatum darf nicht nach dem Enddatum" in text
     assert 'value="2026-07-01"' in text
     assert 'value="2026-06-30"' in text
+
+
+def test_blank_month_override_uses_parameter_sheet_or_default():
+    client = app.test_client()
+    response = client.post(
+        "/analyze",
+        data={
+            "analysis_file": (analysis_workbook(), "analysis.xlsx"),
+            "months_average": "",
+            "analysis_start_date": "",
+            "analysis_end_date": "",
+        },
+        content_type="multipart/form-data",
+    )
+    assert response.status_code == 200
+    assert "3 vollständige Kalendermonate" in response.get_data(as_text=True)
