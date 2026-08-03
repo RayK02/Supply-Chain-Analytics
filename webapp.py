@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import io
 import os
 from datetime import date, datetime
@@ -21,7 +20,6 @@ DEFAULT_ANALYSIS_SETTINGS = {
     "analysis_start_date": "",
     "analysis_end_date": "",
 }
-MAX_INLINE_EXPORT_BYTES = 1_500_000
 MAX_RENDERED_RESULTS = 1_500
 
 
@@ -186,10 +184,10 @@ def analyze():
     try:
         current_inputs = [(uploaded.filename, uploaded.stream) for uploaded in current_uploads]
         results, meta = analyse_workbook(analysis_file.stream, current_inputs, analysis_options)
-        export_bytes = build_export(results, meta)
-        export_filename = f"Lagerhaltungsanalyse_{datetime.now():%Y%m%d_%H%M}.xlsx"
 
         if request.form.get("output_mode") == "download":
+            export_bytes = build_export(results, meta)
+            export_filename = f"Lagerhaltungsanalyse_{datetime.now():%Y%m%d_%H%M}.xlsx"
             return send_file(
                 io.BytesIO(export_bytes),
                 as_attachment=True,
@@ -198,24 +196,12 @@ def analyze():
                 max_age=0,
             )
 
-        export_uri = None
-        inline_export_filename = None
-        if len(export_bytes) <= MAX_INLINE_EXPORT_BYTES:
-            encoded = base64.b64encode(export_bytes).decode("ascii")
-            export_uri = "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64," + encoded
-            inline_export_filename = export_filename
-        else:
-            meta.setdefault("warnings", []).append(
-                "Der XLSX-Export ist für die Ergebnis-Webseite zu gross. "
-                "Nutze beim erneuten Upload die Schaltfläche «Direkt als XLSX»; dabei wird die Datei als eigener Download übertragen."
-            )
-
         result_count_total = len(results)
         rendered_results = results[:MAX_RENDERED_RESULTS]
         if result_count_total > MAX_RENDERED_RESULTS:
             meta.setdefault("warnings", []).append(
                 f"Zur Stabilität werden in der Webansicht nur die ersten {MAX_RENDERED_RESULTS} von "
-                f"{result_count_total} Artikeln angezeigt. Ein direkter XLSX-Download enthält alle Artikel."
+                f"{result_count_total} Artikeln angezeigt. Der direkte XLSX-Download enthält alle Artikel."
             )
 
         return render_template(
@@ -224,8 +210,6 @@ def analyze():
             result_count_total=result_count_total,
             meta=meta,
             error=None,
-            export_uri=export_uri,
-            export_filename=inline_export_filename,
             source_filename=analysis_file.filename,
             current_filenames=[uploaded.filename for uploaded in current_uploads],
             analysis_settings=display_settings,
