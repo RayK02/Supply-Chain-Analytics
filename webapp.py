@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import base64
+import io
 import os
 from datetime import date, datetime
 from typing import Any
 
-from flask import Flask, redirect, render_template, request, url_for
+from flask import Flask, redirect, render_template, request, send_file, url_for
 
 from analysis_service import analyse_workbook
 from inventory import build_export
@@ -16,10 +17,11 @@ app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
 
 DEFAULT_ANALYSIS_SETTINGS = {
     "months_average": "",
+    "xyz_months": "",
     "analysis_start_date": "",
     "analysis_end_date": "",
 }
-MAX_INLINE_EXPORT_BYTES = 2_800_000
+MAX_INLINE_EXPORT_BYTES = 1_500_000
 MAX_RENDERED_RESULTS = 1_500
 
 
@@ -28,10 +30,11 @@ def security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; style-src 'self'; script-src 'self' 'unsafe-inline'; "
+        "default-src 'self'; style-src 'self'; script-src 'self'; "
         "img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
     )
     return response
@@ -86,12 +89,26 @@ def _parse_date(value: str, label: str) -> date | None:
         raise ValueError(f"{label} ist ungültig.") from exc
 
 
+def _optional_months(raw: str, label: str, minimum: int) -> int | None:
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{label} müssen eine ganze Zahl sein.") from exc
+    if not minimum <= value <= 36:
+        raise ValueError(f"{label} müssen zwischen {minimum} und 36 liegen.")
+    return value
+
+
 def _analysis_settings_from_form() -> tuple[dict[str, Any], dict[str, Any]]:
     raw_months = request.form.get("months_average", "").strip()
+    raw_xyz_months = request.form.get("xyz_months", "").strip()
     raw_start = request.form.get("analysis_start_date", "").strip()
     raw_end = request.form.get("analysis_end_date", "").strip()
     display: dict[str, Any] = {
         "months_average": raw_months,
+        "xyz_months": raw_xyz_months,
         "analysis_start_date": raw_start,
         "analysis_end_date": raw_end,
     }
@@ -99,21 +116,30 @@ def _analysis_settings_from_form() -> tuple[dict[str, Any], dict[str, Any]]:
         "analysis_start_date": _parse_date(raw_start, "Das Startdatum"),
         "analysis_end_date": _parse_date(raw_end, "Das Enddatum"),
     }
-    if raw_months:
-        try:
-            months = int(raw_months)
-        except ValueError as exc:
-            raise ValueError("Durchschnittsmonate müssen eine ganze Zahl sein.") from exc
-        if not 1 <= months <= 36:
-            raise ValueError("Durchschnittsmonate müssen zwischen 1 und 36 liegen.")
+
+    months = _optional_months(raw_months, "Durchschnittsmonate", 1)
+    if months is not None:
         settings["months_average"] = months
         display["months_average"] = months
+    xyz_months = _optional_months(raw_xyz_months, "XYZ-Monate", 3)
+    if xyz_months is not None:
+        settings["xyz_months"] = xyz_months
+        display["xyz_months"] = xyz_months
 
     start = settings["analysis_start_date"]
     end = settings["analysis_end_date"]
     if start and end and start > end:
         raise ValueError("Das Startdatum darf nicht nach dem Enddatum liegen.")
     return settings, display
+
+
+def _display_settings_from_request() -> dict[str, Any]:
+    return {
+        "months_average": request.form.get("months_average", ""),
+        "xyz_months": request.form.get("xyz_months", ""),
+        "analysis_start_date": request.form.get("analysis_start_date", ""),
+        "analysis_end_date": request.form.get("analysis_end_date", ""),
+    }
 
 
 @app.post("/analyze")
@@ -124,11 +150,7 @@ def analyze():
         return _render_index(
             error=str(exc),
             status=400,
-            analysis_settings={
-                "months_average": request.form.get("months_average", ""),
-                "analysis_start_date": request.form.get("analysis_start_date", ""),
-                "analysis_end_date": request.form.get("analysis_end_date", ""),
-            },
+            analysis_settings=_display_settings_from_request(),
             settings_submitted=True,
         )
 
@@ -165,16 +187,27 @@ def analyze():
         current_inputs = [(uploaded.filename, uploaded.stream) for uploaded in current_uploads]
         results, meta = analyse_workbook(analysis_file.stream, current_inputs, analysis_options)
         export_bytes = build_export(results, meta)
+        export_filename = f"Lagerhaltungsanalyse_{datetime.now():%Y%m%d_%H%M}.xlsx"
+
+        if request.form.get("output_mode") == "download":
+            return send_file(
+                io.BytesIO(export_bytes),
+                as_attachment=True,
+                download_name=export_filename,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                max_age=0,
+            )
+
         export_uri = None
-        export_filename = None
+        inline_export_filename = None
         if len(export_bytes) <= MAX_INLINE_EXPORT_BYTES:
             encoded = base64.b64encode(export_bytes).decode("ascii")
             export_uri = "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64," + encoded
-            export_filename = f"Lagerhaltungsanalyse_{datetime.now():%Y%m%d_%H%M}.xlsx"
+            inline_export_filename = export_filename
         else:
             meta.setdefault("warnings", []).append(
-                "Der XLSX-Export ist für eine eingebettete Web-Antwort zu gross und wurde deaktiviert. "
-                "Bitte den Zeitraum verkürzen oder die Analyse lokal ausführen."
+                "Der XLSX-Export ist für die Ergebnis-Webseite zu gross. "
+                "Nutze beim erneuten Upload die Schaltfläche «Direkt als XLSX»; dabei wird die Datei als eigener Download übertragen."
             )
 
         result_count_total = len(results)
@@ -182,7 +215,7 @@ def analyze():
         if result_count_total > MAX_RENDERED_RESULTS:
             meta.setdefault("warnings", []).append(
                 f"Zur Stabilität werden in der Webansicht nur die ersten {MAX_RENDERED_RESULTS} von "
-                f"{result_count_total} Artikeln angezeigt. Der Export enthält alle Artikel, sofern verfügbar."
+                f"{result_count_total} Artikeln angezeigt. Ein direkter XLSX-Download enthält alle Artikel."
             )
 
         return render_template(
@@ -192,7 +225,7 @@ def analyze():
             meta=meta,
             error=None,
             export_uri=export_uri,
-            export_filename=export_filename,
+            export_filename=inline_export_filename,
             source_filename=analysis_file.filename,
             current_filenames=[uploaded.filename for uploaded in current_uploads],
             analysis_settings=display_settings,

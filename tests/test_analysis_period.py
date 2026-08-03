@@ -34,13 +34,14 @@ def test_analysis_dates_filter_abc_total_and_average_window():
     assert result["sales_recent"] == 110
     assert result["average_month"] == 55
     assert result["monthly_sales"] == [50, 60]
-    assert result["xyz_class"] is None
-    assert "mindestens 3" in result["xyz_reason"]
+    assert result["xyz_class"] == "X"
+    assert result["xyz_reason"] is None
     assert meta["analysis_start"] == date(2026, 3, 1)
     assert meta["analysis_end"] == date(2026, 6, 30)
     assert meta["average_start"] == date(2026, 5, 1)
     assert meta["average_end"] == date(2026, 6, 30)
     assert meta["months_average"] == 2
+    assert meta["xyz_months_used"] == 4
 
 
 def test_changing_average_months_changes_average_but_not_abc_total():
@@ -114,3 +115,10 @@ def test_average_month_range_is_validated():
         calculate_analysis([sale(date(2026, 3, 1), 10)], parameters={"months_average": 0})
     with pytest.raises(ValueError, match="zwischen 1 und 36"):
         calculate_analysis([sale(date(2026, 3, 1), 10)], parameters={"months_average": 37})
+
+
+def test_xyz_month_range_is_validated():
+    with pytest.raises(ValueError, match="XYZ-Monate"):
+        calculate_analysis([sale(date(2026, 3, 31), 10)], parameters={"xyz_months": 2})
+    with pytest.raises(ValueError, match="XYZ-Monate"):
+        calculate_analysis([sale(date(2026, 3, 31), 10)], parameters={"xyz_months": 37})

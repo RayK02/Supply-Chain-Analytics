@@ -5,13 +5,20 @@ import io
 import re
 import zipfile
 from datetime import date, datetime
-from typing import Any, BinaryIO, Iterable
+from typing import Any, BinaryIO, Iterable, Mapping
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from app.inventory_utils import DEFAULT_PARAMETERS, as_float, normalize_article_key, parse_code_set
+from app.inventory_utils import (
+    DEFAULT_PARAMETERS,
+    PARAMETER_EXPORT_NAMES,
+    as_float,
+    display_article_key,
+    normalize_article_key,
+    parse_code_set,
+)
 
 SHEETS = {
     "sales": "Artikelposten",
@@ -42,7 +49,29 @@ MAX_SHEET_ROWS = 100_000
 MAX_ZIP_ENTRIES = 500
 MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
-EMBEDDED_IST_SHEETS = {SHEETS["current_export"], SHEETS["current"]}
+
+PARAMETER_EXPORT_ORDER = [
+    "document_type",
+    "return_document_types",
+    "months_average",
+    "xyz_months",
+    "analysis_start_date",
+    "analysis_end_date",
+    "abc_a_threshold",
+    "abc_b_threshold",
+    "xyz_x_threshold",
+    "xyz_y_threshold",
+    "xyz_min_months",
+    "minimum_factor_a",
+    "minimum_factor_b",
+    "minimum_factor_c",
+    "order_interval_a",
+    "order_interval_b",
+    "order_interval_c",
+    "automatic_locations",
+    "manual_locations",
+    "max_import_rows",
+]
 
 
 def canon(value: Any) -> str:
@@ -58,8 +87,6 @@ def _rewind(file_object: BinaryIO) -> None:
 
 
 def validate_xlsx_archive(file_object: BinaryIO, filename: str = "Arbeitsmappe") -> None:
-    """Reject malformed, encrypted or resource-amplifying XLSX archives."""
-
     _rewind(file_object)
     try:
         with zipfile.ZipFile(file_object) as archive:
@@ -89,6 +116,18 @@ def sheet(workbook, name: str, required: bool = True) -> str | None:
     return found
 
 
+def effective_row_limit(parameters: Mapping[str, Any] | None) -> int:
+    raw = as_float((parameters or {}).get("max_import_rows"))
+    if raw is None:
+        return MAX_SHEET_ROWS
+    if not float(raw).is_integer():
+        raise ValueError("Maximale Importzeilen müssen eine ganze Zahl sein.")
+    limit = int(raw)
+    if not 1 <= limit <= MAX_SHEET_ROWS:
+        raise ValueError(f"Maximale Importzeilen müssen zwischen 1 und {MAX_SHEET_ROWS:,} liegen.")
+    return limit
+
+
 def rows(workbook, name: str, max_rows: int = MAX_SHEET_ROWS) -> tuple[list[str], list[dict[str, Any]]]:
     worksheet = workbook[name]
     iterator = worksheet.iter_rows(values_only=True)
@@ -116,12 +155,6 @@ def rows(workbook, name: str, max_rows: int = MAX_SHEET_ROWS) -> tuple[list[str]
 
 
 def col(headers: list[str], key: str, required: bool = True) -> str | None:
-    """Resolve columns by exact canonical aliases only.
-
-    Fuzzy substring matching previously caused `Menge` in Artikelposten to be
-    interpreted as `Bestellmenge`.
-    """
-
     by_canonical = {canon(value): value for value in headers}
     for alias in ALIASES[key]:
         found = by_canonical.get(canon(alias))
@@ -153,6 +186,34 @@ def _parameter_number(value: Any) -> float | None:
     return as_float(value)
 
 
+def _parameter_mapping() -> dict[str, str]:
+    aliases: dict[str, list[str]] = {
+        "document_type": ["Belegart", "Verkaufsbelegart", "document_type"],
+        "return_document_types": [
+            "Rückgabebelegarten", "Rücklaufbelegarten", "Gutschriftbelegarten", "return_document_types"
+        ],
+        "months_average": ["Monate", "Durchschnittsmonate", "months_average"],
+        "xyz_months": ["XYZ Monate", "XYZ-Zeitraum", "xyz_months"],
+        "analysis_start_date": ["Startdatum", "Startdatum Analyse", "analysis_start_date"],
+        "analysis_end_date": ["Enddatum", "Enddatum Analyse", "analysis_end_date"],
+        "abc_a_threshold": ["ABC A Grenze", "abc_a_threshold"],
+        "abc_b_threshold": ["ABC B Grenze", "abc_b_threshold"],
+        "xyz_x_threshold": ["XYZ X Grenze", "xyz_x_threshold"],
+        "xyz_y_threshold": ["XYZ Y Grenze", "xyz_y_threshold"],
+        "xyz_min_months": ["XYZ Mindestmonate", "xyz_min_months"],
+        "minimum_factor_a": ["Mindestfaktor A", "minimum_factor_a"],
+        "minimum_factor_b": ["Mindestfaktor B", "minimum_factor_b"],
+        "minimum_factor_c": ["Mindestfaktor C", "minimum_factor_c"],
+        "order_interval_a": ["Bestellintervall A", "order_interval_a"],
+        "order_interval_b": ["Bestellintervall B", "order_interval_b"],
+        "order_interval_c": ["Bestellintervall C", "order_interval_c"],
+        "automatic_locations": ["Automatische Lagerorte", "automatic_locations"],
+        "manual_locations": ["Manuelle Lagerorte", "manual_locations"],
+        "max_import_rows": ["Maximale Importzeilen", "Max Import Rows", "max_import_rows"],
+    }
+    return {canon(alias): key for key, values in aliases.items() for alias in values}
+
+
 def params(workbook) -> dict[str, Any]:
     output: dict[str, Any] = dict(DEFAULT_PARAMETERS)
     name = sheet(workbook, SHEETS["params"], False)
@@ -162,30 +223,9 @@ def params(workbook) -> dict[str, Any]:
         output["_parameter_ignored"] = ""
         return output
 
-    mapping = {
-        "belegart": "document_type",
-        "verkaufsbelegart": "document_type",
-        "ruecklaufbelegarten": "return_document_types",
-        "gutschriftbelegarten": "return_document_types",
-        "monate": "months_average",
-        "durchschnittsmonate": "months_average",
-        "abcagrenze": "abc_a_threshold",
-        "abcbgrenze": "abc_b_threshold",
-        "xyzxgrenze": "xyz_x_threshold",
-        "xyzygrenze": "xyz_y_threshold",
-        "xyzmindestmonate": "xyz_min_months",
-        "mindestfaktora": "minimum_factor_a",
-        "mindestfaktorb": "minimum_factor_b",
-        "mindestfaktorc": "minimum_factor_c",
-        "bestellintervalla": "order_interval_a",
-        "bestellintervallb": "order_interval_b",
-        "bestellintervallc": "order_interval_c",
-        "automatischelagerorte": "automatic_locations",
-        "manuellelagerorte": "manual_locations",
-        "maximportrows": "max_import_rows",
-        "maximaleimportzeilen": "max_import_rows",
-    }
+    mapping = _parameter_mapping()
     text_keys = {"document_type", "return_document_types", "automatic_locations", "manual_locations"}
+    date_keys = {"analysis_start_date", "analysis_end_date"}
     recognized: list[str] = []
     ignored: list[str] = []
 
@@ -193,16 +233,29 @@ def params(workbook) -> dict[str, Any]:
         if not row or row[0] in (None, ""):
             continue
         raw_key = str(row[0]).strip()
-        key = mapping.get(canon(raw_key))
+        canonical_key = canon(raw_key)
+        key = mapping.get(canonical_key)
         value = row[1] if len(row) > 1 else None
         if not key:
-            if canon(raw_key) not in {"parameter", "name", "bezeichnung"}:
+            if canonical_key not in {"parameter", "name", "bezeichnung"}:
                 ignored.append(raw_key)
             continue
         if key in text_keys:
             if value not in (None, ""):
                 output[key] = str(value).strip()
                 recognized.append(raw_key)
+            else:
+                ignored.append(raw_key)
+        elif key in date_keys:
+            parsed_date = as_date(value)
+            if parsed_date is not None:
+                output[key] = parsed_date
+                recognized.append(raw_key)
+            elif value in (None, ""):
+                output.pop(key, None)
+                recognized.append(raw_key)
+            else:
+                ignored.append(raw_key)
         else:
             parsed = _parameter_number(value)
             if parsed is not None:
@@ -211,17 +264,18 @@ def params(workbook) -> dict[str, Any]:
             else:
                 ignored.append(raw_key)
 
+    effective_row_limit(output)
     output["_parameter_source"] = f"Excel: {name}"
     output["_parameter_recognized"] = ", ".join(recognized)
     output["_parameter_ignored"] = ", ".join(ignored)
     return output
 
 
-def article_names(workbook) -> dict[str, str]:
+def article_names(workbook, parameters: Mapping[str, Any] | None = None) -> dict[str, str]:
     name = sheet(workbook, SHEETS["articles"], False)
     if not name:
         return {}
-    headers, data = rows(workbook, name)
+    headers, data = rows(workbook, name, effective_row_limit(parameters))
     article_column = col(headers, "article")
     description_column = col(headers, "description", False)
     output: dict[str, str] = {}
@@ -232,11 +286,11 @@ def article_names(workbook) -> dict[str, str]:
     return output
 
 
-def vpe_values(workbook) -> dict[str, float]:
+def vpe_values(workbook, parameters: Mapping[str, Any] | None = None) -> dict[str, float]:
     name = sheet(workbook, SHEETS["vpe"], False)
     if not name:
         return {}
-    headers, data = rows(workbook, name)
+    headers, data = rows(workbook, name, effective_row_limit(parameters))
     article_column = col(headers, "article")
     vpe_column = col(headers, "vpe")
     output: dict[str, float] = {}
@@ -280,13 +334,14 @@ def current_values(
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     automatic = parse_code_set(parameters.get("automatic_locations"))
     manual = parse_code_set(parameters.get("manual_locations"))
+    row_limit = effective_row_limit(parameters)
     output: dict[str, dict[str, Any]] = {}
     recognized_sheets: list[str] = []
     parsed_rows = 0
     invalid_article_rows = 0
 
     for sheet_name in _current_sheet_candidates(workbook, scan_all_sheets=scan_all_sheets):
-        headers, data = rows(workbook, sheet_name)
+        headers, data = rows(workbook, sheet_name, row_limit)
         if not headers:
             continue
         article_column = col(headers, "article", False)
@@ -306,13 +361,16 @@ def current_values(
         recognized_sheets.append(sheet_name)
         parsed_rows += len(data)
         for row in data:
-            article_key = normalize_article_key(row.get(article_column))
-            if not article_key:
+            raw_article = row.get(article_column)
+            article_key = normalize_article_key(raw_article)
+            article_display = display_article_key(raw_article)
+            if not article_key or not article_display:
                 invalid_article_rows += 1
                 continue
             location = str(row.get(location_column) or "").strip().upper() if location_column else ""
             priority = _location_priority(location, automatic, manual)
             value = {
+                "article_display_current": article_display,
                 "location": location,
                 "manual_review": location in manual,
                 "stock_current": as_float(row.get(stock_column)) if stock_column else None,
@@ -364,7 +422,7 @@ def sales_values(
     workbook,
     parameters: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, Any]]:
-    headers, data = rows(workbook, sheet(workbook, SHEETS["sales"]))
+    headers, data = rows(workbook, sheet(workbook, SHEETS["sales"]), effective_row_limit(parameters))
     article_column = col(headers, "article")
     description_column = col(headers, "description", False)
     date_column = col(headers, "date")
@@ -377,14 +435,16 @@ def sales_values(
     invalid_quantity_rows = 0
 
     for row in data:
-        article_key = normalize_article_key(row.get(article_column))
+        raw_article = row.get(article_column)
+        article_key = normalize_article_key(raw_article)
+        article_display = display_article_key(raw_article)
         day = as_date(row.get(date_column))
         quantity = as_float(row.get(quantity_column))
         description = str(row.get(description_column) or "").strip() if description_column else ""
-        if not article_key:
+        if not article_key or not article_display:
             invalid_article_rows += 1
             continue
-        if article_key and description:
+        if description:
             names.setdefault(article_key, description)
         if not day:
             invalid_date_rows += 1
@@ -394,6 +454,7 @@ def sales_values(
             continue
         output.append({
             "article_key": article_key,
+            "article_display": article_display,
             "description": description,
             "booking_date": day,
             "document_type": str(row.get(type_column) or "").strip(),
@@ -407,6 +468,7 @@ def sales_values(
         "invalid_article_rows": invalid_article_rows,
         "invalid_date_rows": invalid_date_rows,
         "invalid_quantity_rows": invalid_quantity_rows,
+        "effective_row_limit": effective_row_limit(parameters),
     }
 
 
@@ -442,22 +504,22 @@ def analyse_workbook(
     file_object: BinaryIO,
     current_file_objects: Iterable[tuple[str, BinaryIO]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    # Backwards-compatible public function. Import locally to avoid a module cycle.
     from analysis_service import analyse_workbook as service_analyse_workbook
 
     return service_analyse_workbook(file_object, current_file_objects)
 
 
 EXPORT = [
-    ("article_key", "Artikelnummer"),
+    ("article_display", "Artikelnummer"),
     ("description", "Beschreibung"),
     ("abc_class", "ABC"),
     ("xyz_class", "XYZ"),
     ("abcxyz", "ABCXYZ"),
     ("sales_gross", "Bruttoabgang"),
-    ("returns_total", "Rückläufe"),
+    ("returns_total", "Rückläufe netto"),
     ("sales_total", "Nettoabsatz"),
     ("average_month", "Ø Absatz/Monat"),
+    ("xyz_average_month", "Ø Absatz/Monat XYZ"),
     ("stock_current", "Lagerbestand IST"),
     ("minimum_stock", "Mindestbestand Vorschlag"),
     ("minimum_stock_current", "Minimalbestand IST"),
@@ -481,7 +543,8 @@ EXPORT = [
 def _excel_safe(value: Any) -> Any:
     if not isinstance(value, str):
         return value
-    if value and (value[0] in "=+-@" or value[0] in "\t\r\n"):
+    stripped = value.lstrip(" \t\r\n\ufeff")
+    if stripped.startswith(("=", "+", "-", "@")) or value.startswith(("\t", "\r", "\n")):
         return "'" + value
     return value
 
@@ -502,13 +565,19 @@ def build_export(results: list[dict[str, Any]], meta: dict[str, Any]) -> bytes:
     summary.append(["Analyse bis", meta.get("analysis_end")])
     summary.append(["Durchschnitt von", meta.get("average_start")])
     summary.append(["Durchschnitt bis", meta.get("average_end")])
-    summary.append(["Durchschnittsmonate", meta.get("months_average")])
+    summary.append(["Durchschnittsmonate angefordert", meta.get("months_average_requested")])
+    summary.append(["Durchschnittsmonate verwendet", meta.get("months_average_used")])
+    summary.append(["XYZ von", meta.get("xyz_start")])
+    summary.append(["XYZ bis", meta.get("xyz_end")])
+    summary.append(["XYZ-Monate angefordert", meta.get("xyz_months_requested")])
+    summary.append(["XYZ-Monate verwendet", meta.get("xyz_months_used")])
     summary.append(["Bruttoabgang", meta.get("overall_gross_sales")])
-    summary.append(["Rückläufe", meta.get("overall_returns")])
+    summary.append(["Rückläufe netto", meta.get("overall_returns")])
     summary.append(["Nettoabsatz", meta.get("overall_sales")])
     summary.append(["IST-Artikel eingelesen", meta.get("current_articles")])
     summary.append(["IST-Artikel zugeordnet", meta.get("matched_current_articles")])
     summary.append(["Zusätzliche IST-Dateien", meta.get("external_current_files")])
+    summary.append(["VPE fehlt", meta.get("missing_vpe_count")])
     for key, value in sorted((meta.get("counts") or {}).items()):
         summary.append([f"Anzahl {key}", value])
 
@@ -526,14 +595,24 @@ def build_export(results: list[dict[str, Any]], meta: dict[str, Any]) -> bytes:
     import_sheet = workbook.create_sheet("Importbericht")
     import_sheet.append(["Prüfung", "Wert"])
     for key, value in (meta.get("sales_import") or {}).items():
-        import_sheet.append([key, _excel_safe(value)])
+        import_sheet.append([_excel_safe(key), _excel_safe(value)])
     for warning in meta.get("warnings") or []:
         import_sheet.append(["Warnung", _excel_safe(warning)])
 
     parameter_sheet = workbook.create_sheet("Parameter")
-    parameter_sheet.append(["Parameter", "Wert"])
-    for key, value in (meta.get("parameters") or {}).items():
-        parameter_sheet.append([_excel_safe(key), _excel_safe(value)])
+    parameter_sheet.append(["Parameter", "Wert", "Technischer Schlüssel"])
+    parameters = meta.get("parameters") or {}
+    for key in PARAMETER_EXPORT_ORDER:
+        if key not in parameters:
+            continue
+        parameter_sheet.append([
+            PARAMETER_EXPORT_NAMES.get(key, key),
+            _excel_safe(parameters.get(key)),
+            key,
+        ])
+
+    for key in ("_parameter_source", "_parameter_recognized", "_parameter_ignored", "_web_overrides"):
+        import_sheet.append([key, _excel_safe(parameters.get(key, ""))])
 
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(color="FFFFFF", bold=True)
