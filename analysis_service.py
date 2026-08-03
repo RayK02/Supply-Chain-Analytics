@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 from typing import Any, BinaryIO, Iterable, Mapping
 
@@ -89,11 +90,19 @@ def _count_sentence(count: int, singular: str, plural: str) -> str:
     return singular.format(count=count) if count == 1 else plural.format(count=count)
 
 
-def analyse_workbook(
+def prepare_analysis_workbook(
     file_object: BinaryIO,
-    current_file_objects: Iterable[tuple[str, BinaryIO]] | None = None,
     analysis_settings: Mapping[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    *,
+    source_filename: str = "Analyse-Arbeitsmappe",
+) -> dict[str, Any]:
+    """Parse and calculate the analysis workbook without persisting uploaded data.
+
+    The returned payload contains only normalized/aggregated Python data and can be
+    compressed into a short-lived browser token. External IST workbooks can then be
+    added one request at a time without relying on server memory or a database.
+    """
+
     validate_xlsx_archive(file_object, "Analyse-Arbeitsmappe")
     workbook = load_workbook(file_object, data_only=True, read_only=True)
     parameters = _apply_analysis_settings(params(workbook), analysis_settings)
@@ -115,20 +124,44 @@ def analyse_workbook(
         merge_current_values(current, embedded_current, override_equal_priority=True)
         current_sources.append(embedded_info)
 
-    external_uploads = list(current_file_objects or [])
-    if external_uploads:
-        external_current, external_infos = _load_current_uploads(external_uploads, parameters)
-        merge_current_values(current, external_current, override_equal_priority=True)
-        current_sources.extend(external_infos)
-
-    for article_key, value in current.items():
-        description = value.get("description_current")
-        if description and not names.get(article_key):
-            names[article_key] = description
-
     results, meta = calculate_analysis(sales, names, vpes, parameters)
     if meta.get("abc_sales_basis", 0) <= 0:
         raise ValueError("Im gewählten Analysezeitraum wurden keine positiven Netto-Verkaufsabgänge gefunden.")
+
+    return {
+        "results": results,
+        "meta": meta,
+        "parameters": parameters,
+        "sales_import": sales_import,
+        "current": current,
+        "current_sources": current_sources,
+        "external_current_files": 0,
+        "source_filename": source_filename,
+        "current_filenames": [],
+    }
+
+
+def add_current_workbook(
+    payload: dict[str, Any],
+    filename: str,
+    file_object: BinaryIO,
+) -> dict[str, Any]:
+    parameters = payload["parameters"]
+    values, infos = _load_current_uploads([(filename, file_object)], parameters)
+    merge_current_values(payload["current"], values, override_equal_priority=True)
+    payload["current_sources"].extend(infos)
+    payload["external_current_files"] = int(payload.get("external_current_files", 0)) + 1
+    payload["current_filenames"].append(filename)
+    return payload
+
+
+def finalize_prepared_analysis(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    results = copy.deepcopy(list(payload["results"]))
+    meta = copy.deepcopy(dict(payload["meta"]))
+    parameters = copy.deepcopy(dict(payload["parameters"]))
+    sales_import = copy.deepcopy(dict(payload["sales_import"]))
+    current = copy.deepcopy(dict(payload["current"]))
+    current_sources = copy.deepcopy(list(payload["current_sources"]))
 
     matched_current_articles = 0
     validation_count = 0
@@ -137,6 +170,8 @@ def analyse_workbook(
         current_row = current.get(result["article_key"], {})
         if current_row:
             matched_current_articles += 1
+            if not result.get("description") and current_row.get("description_current"):
+                result["description"] = current_row["description_current"]
         result.update({
             "location": current_row.get("location", ""),
             "manual_review": bool(current_row.get("manual_review")),
@@ -232,9 +267,20 @@ def analyse_workbook(
     meta["parameters"] = parameters
     meta["sales_import"] = sales_import
     meta["current_sources"] = current_sources
-    meta["external_current_files"] = len(external_uploads)
+    meta["external_current_files"] = int(payload.get("external_current_files", 0))
     meta["current_articles"] = len(current)
     meta["matched_current_articles"] = matched_current_articles
     meta["validation_count"] = validation_count
     meta["missing_vpe_count"] = missing_vpe_count
     return sorted(results, key=lambda row: (-max(row["sales_total"], 0), row["article_key"])), meta
+
+
+def analyse_workbook(
+    file_object: BinaryIO,
+    current_file_objects: Iterable[tuple[str, BinaryIO]] | None = None,
+    analysis_settings: Mapping[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    payload = prepare_analysis_workbook(file_object, analysis_settings)
+    for filename, current_file in list(current_file_objects or []):
+        add_current_workbook(payload, filename, current_file)
+    return finalize_prepared_analysis(payload)
