@@ -5,14 +5,21 @@ import os
 from datetime import date, datetime
 from typing import Any
 
-from flask import Flask, redirect, render_template, request, send_file, url_for
+from flask import Flask, jsonify, redirect, render_template, request, send_file, url_for
 
-from analysis_service import analyse_workbook
+from analysis_service import (
+    add_current_workbook,
+    analyse_workbook,
+    finalize_prepared_analysis,
+    prepare_analysis_workbook,
+)
+from analysis_token import AnalysisTokenError, decode_analysis_token, encode_analysis_token
 from inventory import build_export
 
 app = Flask(__name__)
-# Vercel Functions reject payloads around 4.5 MB before Flask can handle them.
-app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
+# Vercel rejects request bodies around 4.5 MB before Flask can handle them.
+# The browser therefore transfers workbooks one at a time.
+app.config["MAX_CONTENT_LENGTH"] = 4_400_000
 
 APP_COMMIT = os.environ.get("VERCEL_GIT_COMMIT_SHA", "local")
 DEFAULT_ANALYSIS_SETTINGS = {
@@ -72,6 +79,10 @@ def _render_index(
         settings_submitted=settings_submitted,
         **context,
     ), status
+
+
+def _api_error(message: str, status: int = 400):
+    return jsonify({"error": message}), status
 
 
 @app.get("/")
@@ -157,8 +168,112 @@ def _display_settings_from_request() -> dict[str, Any]:
     }
 
 
+def _send_export(results: list[dict[str, Any]], meta: dict[str, Any]):
+    export_bytes = build_export(results, meta)
+    export_filename = f"Lagerhaltungsanalyse_{datetime.now():%Y%m%d_%H%M}.xlsx"
+    return send_file(
+        io.BytesIO(export_bytes),
+        as_attachment=True,
+        download_name=export_filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        max_age=0,
+    )
+
+
+def _render_results(
+    results: list[dict[str, Any]],
+    meta: dict[str, Any],
+    *,
+    source_filename: str,
+    current_filenames: list[str],
+    analysis_settings: dict[str, Any],
+):
+    result_count_total = len(results)
+    rendered_results = results[:MAX_RENDERED_RESULTS]
+    if result_count_total > MAX_RENDERED_RESULTS:
+        meta.setdefault("warnings", []).append(
+            f"Zur Stabilität werden in der Webansicht nur die ersten {MAX_RENDERED_RESULTS} von "
+            f"{result_count_total} Artikeln angezeigt. Der direkte XLSX-Download enthält alle Artikel."
+        )
+
+    return _render_page(
+        results=rendered_results,
+        result_count_total=result_count_total,
+        meta=meta,
+        error=None,
+        source_filename=source_filename,
+        current_filenames=current_filenames,
+        analysis_settings=analysis_settings,
+        settings_submitted=True,
+    )
+
+
+@app.post("/api/prepare-analysis")
+def prepare_analysis_api():
+    try:
+        analysis_options, display_settings = _analysis_settings_from_form()
+        analysis_file = request.files.get("analysis_file")
+        if not analysis_file or not analysis_file.filename:
+            return _api_error("Bitte die Analyse-Arbeitsmappe auswählen.")
+        error = _xlsx_error(analysis_file.filename, "Die Analyse-Arbeitsmappe")
+        if error:
+            return _api_error(error)
+
+        payload = prepare_analysis_workbook(
+            analysis_file.stream,
+            analysis_options,
+            source_filename=analysis_file.filename,
+        )
+        payload["display_settings"] = display_settings
+        return jsonify({"token": encode_analysis_token(payload)})
+    except (ValueError, AnalysisTokenError) as exc:
+        return _api_error(str(exc))
+    except Exception:
+        return _api_error("Die Analyse-Arbeitsmappe konnte nicht vorbereitet werden.")
+
+
+@app.post("/api/add-current")
+def add_current_api():
+    try:
+        payload = decode_analysis_token(request.form.get("analysis_token", ""))
+        current_file = request.files.get("current_file")
+        if not current_file or not current_file.filename:
+            return _api_error("Bitte eine IST-Lagerhaltungsdatenliste auswählen.")
+        error = _xlsx_error(current_file.filename, "Die IST-Lagerhaltungsdatenliste")
+        if error:
+            return _api_error(error)
+
+        add_current_workbook(payload, current_file.filename, current_file.stream)
+        return jsonify({"token": encode_analysis_token(payload)})
+    except (ValueError, AnalysisTokenError) as exc:
+        return _api_error(str(exc))
+    except Exception:
+        return _api_error("Die IST-Lagerhaltungsdatenliste konnte nicht verarbeitet werden.")
+
+
+@app.post("/api/finalize-analysis")
+def finalize_analysis_api():
+    try:
+        payload = decode_analysis_token(request.form.get("analysis_token", ""))
+        results, meta = finalize_prepared_analysis(payload)
+        if request.form.get("output_mode") == "download":
+            return _send_export(results, meta)
+        return _render_results(
+            results,
+            meta,
+            source_filename=payload["source_filename"],
+            current_filenames=list(payload["current_filenames"]),
+            analysis_settings=dict(payload.get("display_settings") or DEFAULT_ANALYSIS_SETTINGS),
+        )
+    except (ValueError, AnalysisTokenError) as exc:
+        return _api_error(str(exc))
+    except Exception:
+        return _api_error("Die vorbereitete Analyse konnte nicht abgeschlossen werden.")
+
+
 @app.post("/analyze")
 def analyze():
+    """No-JavaScript fallback. The browser UI normally uses the stateless API."""
     try:
         analysis_options, display_settings = _analysis_settings_from_form()
     except ValueError as exc:
@@ -201,35 +316,14 @@ def analyze():
     try:
         current_inputs = [(uploaded.filename, uploaded.stream) for uploaded in current_uploads]
         results, meta = analyse_workbook(analysis_file.stream, current_inputs, analysis_options)
-
         if request.form.get("output_mode") == "download":
-            export_bytes = build_export(results, meta)
-            export_filename = f"Lagerhaltungsanalyse_{datetime.now():%Y%m%d_%H%M}.xlsx"
-            return send_file(
-                io.BytesIO(export_bytes),
-                as_attachment=True,
-                download_name=export_filename,
-                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                max_age=0,
-            )
-
-        result_count_total = len(results)
-        rendered_results = results[:MAX_RENDERED_RESULTS]
-        if result_count_total > MAX_RENDERED_RESULTS:
-            meta.setdefault("warnings", []).append(
-                f"Zur Stabilität werden in der Webansicht nur die ersten {MAX_RENDERED_RESULTS} von "
-                f"{result_count_total} Artikeln angezeigt. Der direkte XLSX-Download enthält alle Artikel."
-            )
-
-        return _render_page(
-            results=rendered_results,
-            result_count_total=result_count_total,
-            meta=meta,
-            error=None,
+            return _send_export(results, meta)
+        return _render_results(
+            results,
+            meta,
             source_filename=analysis_file.filename,
             current_filenames=[uploaded.filename for uploaded in current_uploads],
             analysis_settings=display_settings,
-            settings_submitted=True,
         )
     except Exception as exc:
         return _render_index(
@@ -242,8 +336,13 @@ def analyze():
 
 @app.errorhandler(413)
 def too_large(_error):
+    if request.path.startswith("/api/"):
+        return _api_error(
+            "Eine einzelne Datei ist für den Web-Upload zu gross. Bitte die Datei unter ca. 4,1 MB verkleinern oder die lokale Version verwenden.",
+            status=413,
+        )
     return _render_index(
-        error="Die Dateien sind für den Web-Upload zu gross. Bitte insgesamt unter 4 MB bleiben oder die lokale Version verwenden.",
+        error="Eine einzelne Datei ist für den Web-Upload zu gross. Bitte die Datei unter ca. 4,1 MB verkleinern oder die lokale Version verwenden.",
         status=413,
         settings_submitted=False,
     )
