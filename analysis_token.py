@@ -6,7 +6,7 @@ import zlib
 from datetime import date, datetime
 from typing import Any
 
-TOKEN_VERSION = 1
+TOKEN_VERSION = 2
 MAX_TOKEN_CHARS = 2_500_000
 MAX_DECOMPRESSED_BYTES = 20 * 1024 * 1024
 
@@ -37,8 +37,9 @@ def _validate_payload(payload: Any) -> dict[str, Any]:
         raise AnalysisTokenError("Der temporäre Analysestatus ist ungültig oder veraltet.")
 
     expected_types = {
-        "results": list,
-        "meta": dict,
+        "sales": list,
+        "names": dict,
+        "vpes": dict,
         "parameters": dict,
         "sales_import": dict,
         "current": dict,
@@ -50,8 +51,10 @@ def _validate_payload(payload: Any) -> dict[str, Any]:
         if not isinstance(payload.get(key), expected_type):
             raise AnalysisTokenError("Der temporäre Analysestatus ist unvollständig.")
 
-    if len(payload["results"]) > 100_000 or len(payload["current"]) > 100_000:
-        raise AnalysisTokenError("Der temporäre Analysestatus enthält zu viele Artikel.")
+    if len(payload["sales"]) > 100_000 or len(payload["current"]) > 100_000:
+        raise AnalysisTokenError("Der temporäre Analysestatus enthält zu viele Datenzeilen.")
+    if any(not isinstance(row, list) or len(row) != 6 for row in payload["sales"]):
+        raise AnalysisTokenError("Der temporäre Analysestatus enthält ungültige Artikelposten.")
     return payload
 
 
@@ -65,11 +68,11 @@ def encode_analysis_token(payload: dict[str, Any]) -> str:
         default=_json_default,
     ).encode("utf-8")
     if len(raw) > MAX_DECOMPRESSED_BYTES:
-        raise AnalysisTokenError("Die vorbereitete Analyse ist für die Webversion zu gross.")
+        raise AnalysisTokenError("Die vorbereiteten Upload-Daten sind für die Webversion zu gross.")
 
     token = base64.urlsafe_b64encode(zlib.compress(raw, level=9)).decode("ascii")
     if len(token) > MAX_TOKEN_CHARS:
-        raise AnalysisTokenError("Die vorbereitete Analyse ist für die Webversion zu gross.")
+        raise AnalysisTokenError("Die vorbereiteten Upload-Daten sind für die Webversion zu gross.")
     return token
 
 
