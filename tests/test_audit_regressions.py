@@ -8,6 +8,7 @@ from openpyxl import Workbook, load_workbook
 from analysis_service import analyse_workbook
 from app.inventory_analysis import calculate_analysis
 from inventory import build_export, params
+from webapp import app
 
 
 def workbook_stream(workbook: Workbook) -> io.BytesIO:
@@ -141,3 +142,31 @@ def test_audit_negative_credit_quantity_is_a_return_correction():
     assert result["sales_total"] == 1560
     assert meta["overall_returns"] == -360
     assert meta["overall_sales"] == 1560
+
+
+def test_result_page_has_no_base64_export_and_states_public_access():
+    workbook = Workbook()
+    sales = workbook.active
+    sales.title = "Artikelposten"
+    sales.append(["Artikelnr.", "Buchungsdatum", "Belegart", "Menge"])
+    sales.append(["A-1", date(2026, 6, 30), "Verkaufslieferung", -100])
+
+    client = app.test_client()
+    response = client.post(
+        "/analyze",
+        data={
+            "analysis_file": (workbook_stream(workbook), "analysis.xlsx"),
+            "months_average": "1",
+            "xyz_months": "3",
+            "analysis_start_date": "",
+            "analysis_end_date": "",
+            "output_mode": "view",
+        },
+        content_type="multipart/form-data",
+    )
+    text = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64" not in text
+    assert "Öffentliche Webversion ohne Zugriffsschutz" in text
+    assert "XLSX über Direktmodus" in text
