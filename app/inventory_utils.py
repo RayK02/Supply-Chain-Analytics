@@ -9,6 +9,7 @@ DEFAULT_PARAMETERS: dict[str, str] = {
     "document_type": "Verkaufslieferung",
     "return_document_types": "Verkaufsrücksendung,Verkaufsgutschrift,Gutschrift",
     "months_average": "3",
+    "xyz_months": "12",
     "abc_a_threshold": "0.80",
     "abc_b_threshold": "0.95",
     "xyz_x_threshold": "0.50",
@@ -27,34 +28,36 @@ DEFAULT_PARAMETERS: dict[str, str] = {
 
 PARAMETER_META: dict[str, tuple[str, str]] = {
     "document_type": ("Belegart", "Diese Belegart wird als Verkaufsbewegung berücksichtigt."),
-    "return_document_types": ("Belegarten", "Kommagetrennte Belegarten, die als Rücklauf vom Absatz abgezogen werden."),
-    "months_average": ("Monate", "Anzahl vollständig abgeschlossener Kalendermonate für Ø Absatz und Mindestbestand."),
-    "abc_a_threshold": ("Anteil", "Kumulierte Absatzgrenze für A-Artikel."),
-    "abc_b_threshold": ("Anteil", "Kumulierte Absatzgrenze für B-Artikel; der Rest ist C."),
-    "xyz_x_threshold": ("VK", "Bis zu diesem Variationskoeffizienten gilt ein Artikel als X."),
-    "xyz_y_threshold": ("VK", "Bis zu diesem Variationskoeffizienten gilt ein Artikel als Y; darüber Z."),
-    "xyz_min_months": ("Monate", "Mindestanzahl Monate für eine belastbare XYZ-Klassifizierung."),
-    "minimum_factor_a": ("Monate", "Mindestbestand für A = Ø Monatsabsatz × Faktor."),
-    "minimum_factor_b": ("Monate", "Mindestbestand für B = Ø Monatsabsatz × Faktor."),
-    "minimum_factor_c": ("Monate", "Mindestbestand für C = Ø Monatsabsatz × Faktor."),
-    "order_interval_a": ("Wochen", "Bestellintervall für A-Artikel."),
-    "order_interval_b": ("Wochen", "Bestellintervall für B-Artikel."),
-    "order_interval_c": ("Wochen", "Bestellintervall für C-Artikel."),
-    "automatic_locations": ("Codes", "Kommagetrennte Lagerorte für automatische IST-Bewertung."),
-    "manual_locations": ("Codes", "Kommagetrennte Sonderlagerorte für manuelle Prüfung."),
-    "max_import_rows": ("Zeilen", "Sicherheitsgrenze pro Tabellenblatt."),
+    "return_document_types": ("Rückgabebelegarten", "Kommagetrennte Belegarten, die als Rücklauf vom Absatz abgezogen werden."),
+    "months_average": ("Durchschnittsmonate", "Anzahl vollständig abgedeckter Kalendermonate für Ø Absatz und Mindestbestand."),
+    "xyz_months": ("XYZ-Monate", "Separater Zeitraum für die XYZ-Klassifizierung."),
+    "abc_a_threshold": ("ABC A Grenze", "Kumulierte Absatzgrenze für A-Artikel."),
+    "abc_b_threshold": ("ABC B Grenze", "Kumulierte Absatzgrenze für B-Artikel; der Rest ist C."),
+    "xyz_x_threshold": ("XYZ X Grenze", "Bis zu diesem Variationskoeffizienten gilt ein Artikel als X."),
+    "xyz_y_threshold": ("XYZ Y Grenze", "Bis zu diesem Variationskoeffizienten gilt ein Artikel als Y; darüber Z."),
+    "xyz_min_months": ("XYZ Mindestmonate", "Mindestanzahl vollständig abgedeckter Monate für eine XYZ-Klassifizierung."),
+    "minimum_factor_a": ("Mindestfaktor A", "Mindestbestand für A = Ø Monatsabsatz × Faktor."),
+    "minimum_factor_b": ("Mindestfaktor B", "Mindestbestand für B = Ø Monatsabsatz × Faktor."),
+    "minimum_factor_c": ("Mindestfaktor C", "Mindestbestand für C = Ø Monatsabsatz × Faktor."),
+    "order_interval_a": ("Bestellintervall A", "Bestellintervall für A-Artikel in Wochen."),
+    "order_interval_b": ("Bestellintervall B", "Bestellintervall für B-Artikel in Wochen."),
+    "order_interval_c": ("Bestellintervall C", "Bestellintervall für C-Artikel in Wochen."),
+    "automatic_locations": ("Automatische Lagerorte", "Kommagetrennte Lagerorte für automatische IST-Bewertung."),
+    "manual_locations": ("Manuelle Lagerorte", "Kommagetrennte Sonderlagerorte für manuelle Prüfung."),
+    "max_import_rows": ("Maximale Importzeilen", "Wirksame Zeilengrenze pro Tabellenblatt; maximal 100'000."),
+    "analysis_start_date": ("Startdatum", "Erster eingeschlossener Tag der Analyse."),
+    "analysis_end_date": ("Enddatum", "Letzter eingeschlossener Tag der Analyse."),
+}
+
+PARAMETER_EXPORT_NAMES: dict[str, str] = {
+    key: label for key, (label, _description) in PARAMETER_META.items()
 }
 
 _ARTICLE_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9._/+\-]*$")
 
 
-def normalize_article_key(value: Any) -> str | None:
-    """Normalize an ERP article identifier without interpreting text as a number.
-
-    Text values retain letters and common ERP separators. Numeric Excel cells are
-    converted to an integer string; short purely numeric identifiers are padded to
-    six characters to remain compatible with the existing Business Central files.
-    """
+def display_article_key(value: Any) -> str | None:
+    """Return a cleaned ERP article identifier while preserving its letter case."""
 
     if value is None or isinstance(value, bool):
         return None
@@ -65,15 +68,23 @@ def normalize_article_key(value: Any) -> str | None:
             return None
         text = str(int(value))
     else:
-        text = re.sub(r"\s+", "", str(value).strip()).upper()
+        text = re.sub(r"\s+", "", str(value).strip())
         if not text:
             return None
 
-    if len(text) > 64 or not _ARTICLE_PATTERN.fullmatch(text):
+    canonical = text.upper()
+    if len(text) > 64 or not _ARTICLE_PATTERN.fullmatch(canonical):
         return None
     if text.isdigit() and len(text) < 6:
         return text.zfill(6)
     return text
+
+
+def normalize_article_key(value: Any) -> str | None:
+    """Return a case-insensitive internal key without reinterpreting text as a number."""
+
+    display = display_article_key(value)
+    return display.upper() if display is not None else None
 
 
 def as_float(value: Any) -> float | None:
@@ -135,7 +146,12 @@ def sales_components(
     document_type: str,
     return_document_types: Any = None,
 ) -> tuple[float, float, float]:
-    """Return gross outbound, returns and signed net demand for one ledger row."""
+    """Return gross outbound, signed net returns and signed net demand.
+
+    Positive quantities on return document types reduce demand. A negative return
+    quantity is treated as a correction/reversal and therefore increases demand.
+    The identity is always: net demand = gross outbound - net returns.
+    """
 
     quantity = as_float(row.get("quantity"))
     if quantity is None or quantity == 0:
@@ -149,12 +165,10 @@ def sales_components(
         if quantity < 0:
             gross = -quantity
             return gross, 0.0, gross
-        # Positive reversal/return posted under the sales document type.
         return 0.0, quantity, -quantity
 
     if current_type in return_types:
-        returned = abs(quantity)
-        return 0.0, returned, -returned
+        return 0.0, quantity, -quantity
 
     return 0.0, 0.0, 0.0
 
