@@ -169,4 +169,5 @@ def test_result_page_has_no_base64_export_and_states_public_access():
     assert response.status_code == 200
     assert "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64" not in text
     assert "Öffentliche Webversion ohne Zugriffsschutz" in text
-    assert "XLSX über Direktmodus" in text
+    assert "Für XLSX: Dateien oben erneut auswählen" in text
+    assert "Der Browser gibt die Dateiauswahl nach dem Seitenwechsel nicht zurück" in text
