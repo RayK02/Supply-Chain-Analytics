@@ -41,6 +41,37 @@ def _apply_analysis_settings(
     return output
 
 
+def _compact_sales(rows: Iterable[Mapping[str, Any]]) -> list[list[Any]]:
+    """Store normalized sales rows compactly in the stateless browser token."""
+    return [
+        [
+            row.get("article_key"),
+            row.get("article_display"),
+            row.get("description", ""),
+            row.get("booking_date"),
+            row.get("document_type", ""),
+            row.get("quantity"),
+        ]
+        for row in rows
+    ]
+
+
+def _expand_sales(rows: Iterable[list[Any]]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 6:
+            raise ValueError("Der temporäre Analysestatus enthält ungültige Artikelposten.")
+        output.append({
+            "article_key": row[0],
+            "article_display": row[1],
+            "description": row[2],
+            "booking_date": row[3],
+            "document_type": row[4],
+            "quantity": row[5],
+        })
+    return output
+
+
 def _is_multiple(value: float, divisor: float) -> bool:
     if divisor <= 0:
         return True
@@ -96,11 +127,11 @@ def prepare_analysis_workbook(
     *,
     source_filename: str = "Analyse-Arbeitsmappe",
 ) -> dict[str, Any]:
-    """Parse and calculate the analysis workbook without persisting uploaded data.
+    """Read and normalize the first workbook without running the calculation yet.
 
-    The returned payload contains only normalized/aggregated Python data and can be
-    compressed into a short-lived browser token. External IST workbooks can then be
-    added one request at a time without relying on server memory or a database.
+    The compact payload is returned to the browser. Additional IST workbooks are
+    merged into it one request at a time. The complete calculation runs exactly
+    once in ``finalize_prepared_analysis`` after every selected file is present.
     """
 
     validate_xlsx_archive(file_object, "Analyse-Arbeitsmappe")
@@ -124,13 +155,10 @@ def prepare_analysis_workbook(
         merge_current_values(current, embedded_current, override_equal_priority=True)
         current_sources.append(embedded_info)
 
-    results, meta = calculate_analysis(sales, names, vpes, parameters)
-    if meta.get("abc_sales_basis", 0) <= 0:
-        raise ValueError("Im gewählten Analysezeitraum wurden keine positiven Netto-Verkaufsabgänge gefunden.")
-
     return {
-        "results": results,
-        "meta": meta,
+        "sales": _compact_sales(sales),
+        "names": names,
+        "vpes": vpes,
         "parameters": parameters,
         "sales_import": sales_import,
         "current": current,
@@ -156,12 +184,24 @@ def add_current_workbook(
 
 
 def finalize_prepared_analysis(payload: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    results = copy.deepcopy(list(payload["results"]))
-    meta = copy.deepcopy(dict(payload["meta"]))
     parameters = copy.deepcopy(dict(payload["parameters"]))
     sales_import = copy.deepcopy(dict(payload["sales_import"]))
     current = copy.deepcopy(dict(payload["current"]))
     current_sources = copy.deepcopy(list(payload["current_sources"]))
+    names = copy.deepcopy(dict(payload["names"]))
+    vpes = copy.deepcopy(dict(payload["vpes"]))
+    sales = _expand_sales(copy.deepcopy(list(payload["sales"])))
+
+    # IST descriptions are part of the complete uploaded data basis and are
+    # available before the single final calculation is executed.
+    for article_key, value in current.items():
+        description = value.get("description_current")
+        if description and not names.get(article_key):
+            names[article_key] = description
+
+    results, meta = calculate_analysis(sales, names, vpes, parameters)
+    if meta.get("abc_sales_basis", 0) <= 0:
+        raise ValueError("Im gewählten Analysezeitraum wurden keine positiven Netto-Verkaufsabgänge gefunden.")
 
     matched_current_articles = 0
     validation_count = 0
@@ -170,8 +210,6 @@ def finalize_prepared_analysis(payload: Mapping[str, Any]) -> tuple[list[dict[st
         current_row = current.get(result["article_key"], {})
         if current_row:
             matched_current_articles += 1
-            if not result.get("description") and current_row.get("description_current"):
-                result["description"] = current_row["description_current"]
         result.update({
             "location": current_row.get("location", ""),
             "manual_review": bool(current_row.get("manual_review")),
@@ -272,6 +310,7 @@ def finalize_prepared_analysis(payload: Mapping[str, Any]) -> tuple[list[dict[st
     meta["matched_current_articles"] = matched_current_articles
     meta["validation_count"] = validation_count
     meta["missing_vpe_count"] = missing_vpe_count
+    meta["calculation_stage"] = "after_all_uploads"
     return sorted(results, key=lambda row: (-max(row["sales_total"], 0), row["article_key"])), meta
 
 
