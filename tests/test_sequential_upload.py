@@ -5,7 +5,12 @@ from datetime import date
 
 from openpyxl import Workbook, load_workbook
 
-from analysis_service import prepare_analysis_workbook
+import analysis_service
+from analysis_service import (
+    add_current_workbook,
+    finalize_prepared_analysis,
+    prepare_analysis_workbook,
+)
 from analysis_token import decode_analysis_token, encode_analysis_token
 from webapp import app
 
@@ -58,7 +63,7 @@ def prepare_token(client) -> str:
     return response.get_json()["token"]
 
 
-def test_analysis_token_roundtrip_preserves_dates_and_payload():
+def test_analysis_token_roundtrip_preserves_uploaded_data_without_precomputed_results():
     payload = prepare_analysis_workbook(
         workbook_stream(analysis_workbook()),
         {"months_average": 1, "xyz_months": 3},
@@ -74,8 +79,36 @@ def test_analysis_token_roundtrip_preserves_dates_and_payload():
     decoded = decode_analysis_token(encode_analysis_token(payload))
 
     assert decoded["source_filename"] == "analysis.xlsx"
-    assert decoded["results"][0]["article_display"] == "A-100"
-    assert decoded["meta"]["analysis_end"] == date(2026, 6, 30)
+    assert decoded["sales"][0][1] == "A-100"
+    assert decoded["sales"][0][3] == date(2026, 6, 30)
+    assert "results" not in decoded
+    assert "meta" not in decoded
+
+
+def test_calculation_runs_once_only_after_all_uploads(monkeypatch):
+    calls: list[int] = []
+    real_calculate = analysis_service.calculate_analysis
+
+    def tracked_calculate(*args, **kwargs):
+        calls.append(1)
+        return real_calculate(*args, **kwargs)
+
+    monkeypatch.setattr(analysis_service, "calculate_analysis", tracked_calculate)
+
+    payload = prepare_analysis_workbook(
+        workbook_stream(analysis_workbook()),
+        {"months_average": 1, "xyz_months": 3},
+        source_filename="analysis.xlsx",
+    )
+    assert calls == []
+
+    add_current_workbook(payload, "current.xlsx", workbook_stream(current_workbook()))
+    assert calls == []
+
+    results, meta = finalize_prepared_analysis(payload)
+    assert calls == [1]
+    assert results[0]["stock_current"] == 25
+    assert meta["calculation_stage"] == "after_all_uploads"
 
 
 def test_sequential_api_adds_current_workbook_and_renders_result():
