@@ -14,6 +14,7 @@ app = Flask(__name__)
 # Vercel Functions reject payloads around 4.5 MB before Flask can handle them.
 app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
 
+APP_COMMIT = os.environ.get("VERCEL_GIT_COMMIT_SHA", "local")
 DEFAULT_ANALYSIS_SETTINGS = {
     "months_average": "",
     "xyz_months": "",
@@ -21,6 +22,17 @@ DEFAULT_ANALYSIS_SETTINGS = {
     "analysis_end_date": "",
 }
 MAX_RENDERED_RESULTS = 1_500
+
+_OLD_DOWNLOAD_GUIDANCE = (
+    '<span class="download disabled" title="Für einen XLSX-Export oben den direkten XLSX-Modus wählen">'
+    'XLSX über Direktmodus</span>'
+)
+_NEW_DOWNLOAD_GUIDANCE = (
+    '<span class="download disabled" aria-disabled="true" '
+    'title="Der Browser gibt die Dateiauswahl nach dem Seitenwechsel nicht zurück. '
+    'Deshalb oben dieselben Dateien erneut auswählen und «Direkt als XLSX – ohne Webansicht» klicken.">'
+    'Für XLSX: Dateien oben erneut auswählen</span>'
+)
 
 
 @app.after_request
@@ -31,11 +43,17 @@ def security_headers(response):
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Cache-Control"] = "no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
+    response.headers["X-App-Commit"] = APP_COMMIT
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; style-src 'self'; script-src 'self'; "
         "img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
     )
     return response
+
+
+def _render_page(**context: Any) -> str:
+    html = render_template("index.html", **context)
+    return html.replace(_OLD_DOWNLOAD_GUIDANCE, _NEW_DOWNLOAD_GUIDANCE)
 
 
 def _render_index(
@@ -46,8 +64,7 @@ def _render_index(
     settings_submitted: bool = False,
     **context: Any,
 ):
-    return render_template(
-        "index.html",
+    return _render_page(
         results=None,
         meta=None,
         error=error,
@@ -69,7 +86,7 @@ def analyze_get():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "app": "lagerhaltungsdaten"}
+    return {"status": "ok", "app": "lagerhaltungsdaten", "commit": APP_COMMIT}
 
 
 def _xlsx_error(filename: str, label: str) -> str | None:
@@ -204,8 +221,7 @@ def analyze():
                 f"{result_count_total} Artikeln angezeigt. Der direkte XLSX-Download enthält alle Artikel."
             )
 
-        return render_template(
-            "index.html",
+        return _render_page(
             results=rendered_results,
             result_count_total=result_count_total,
             meta=meta,

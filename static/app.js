@@ -47,13 +47,6 @@
     });
   }
 
-  const exportNotice = document.querySelector('.result-head .download.disabled');
-  if (exportNotice) {
-    exportNotice.textContent = 'Für XLSX: Dateien oben erneut auswählen';
-    exportNotice.title = 'Browser stellen Dateiauswahlen nach dem Seitenwechsel nicht wieder her. Wähle oben dieselben Dateien erneut und klicke «Direkt als XLSX – ohne Webansicht».';
-    exportNotice.setAttribute('aria-disabled', 'true');
-  }
-
   const table = document.getElementById('resultsTable');
   if (!table) return;
   const search = document.getElementById('search');
