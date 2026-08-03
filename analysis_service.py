@@ -20,6 +20,7 @@ from inventory import (
 
 _ALLOWED_OVERRIDES = {
     "months_average",
+    "xyz_months",
     "analysis_start_date",
     "analysis_end_date",
 }
@@ -76,14 +77,16 @@ def _plausibility_messages(result: dict[str, Any]) -> list[str]:
         if order_proposed is not None and order_proposed > maximum:
             messages.append("Bestellmengen-Vorschlag liegt über dem Maximalbestand IST")
 
-    if order_proposed is not None and order_proposed > 0 and (vpe is None or vpe <= 0):
-        messages.append("VPE fehlt; Bestellmenge wurde nur auf ganze Stück gerundet")
     if order_current is not None and order_current > 0 and vpe and vpe > 0 and not _is_multiple(order_current, vpe):
         messages.append("Bestellmenge IST ist kein Vielfaches der VPE")
     if result.get("sales_total", 0) <= 0 and (minimum_current or order_current):
         messages.append("IST-Lagerparameter vorhanden, aber Nettoabsatz im Analysezeitraum ist nicht positiv")
 
     return messages
+
+
+def _count_sentence(count: int, singular: str, plural: str) -> str:
+    return singular.format(count=count) if count == 1 else plural.format(count=count)
 
 
 def analyse_workbook(
@@ -94,8 +97,8 @@ def analyse_workbook(
     validate_xlsx_archive(file_object, "Analyse-Arbeitsmappe")
     workbook = load_workbook(file_object, data_only=True, read_only=True)
     parameters = _apply_analysis_settings(params(workbook), analysis_settings)
-    names = article_names(workbook)
-    vpes = vpe_values(workbook)
+    names = article_names(workbook, parameters)
+    vpes = vpe_values(workbook, parameters)
     sales, sales_names, sales_import = sales_values(workbook, parameters)
     names = {**sales_names, **names}
 
@@ -129,6 +132,7 @@ def analyse_workbook(
 
     matched_current_articles = 0
     validation_count = 0
+    missing_vpe_count = 0
     for result in results:
         current_row = current.get(result["article_key"], {})
         if current_row:
@@ -153,6 +157,14 @@ def analyse_workbook(
         )
         result["xyz_class"] = result["xyz_class"] or "–"
         result["abcxyz"] = result["abcxyz"] or f'{result["abc_class"]}–'
+        result["vpe_missing"] = bool(
+            result.get("order_quantity") is not None
+            and result.get("order_quantity", 0) > 0
+            and (result.get("vpe") is None or result.get("vpe", 0) <= 0)
+        )
+        if result["vpe_missing"]:
+            missing_vpe_count += 1
+
         result["validation_messages"] = _plausibility_messages(result)
         result["validation_text"] = "; ".join(result["validation_messages"])
         if result["validation_messages"]:
@@ -172,20 +184,49 @@ def analyse_workbook(
 
     warnings = list(meta.get("warnings") or [])
     if sales_import["invalid_article_rows"]:
-        warnings.append(
-            f'{sales_import["invalid_article_rows"]} Artikelposten-Zeilen wurden wegen ungültiger Artikelnummern verworfen.'
-        )
+        warnings.append(_count_sentence(
+            sales_import["invalid_article_rows"],
+            "{count} Artikelposten-Zeile wurde wegen einer ungültigen Artikelnummer verworfen.",
+            "{count} Artikelposten-Zeilen wurden wegen ungültiger Artikelnummern verworfen.",
+        ))
     if sales_import["invalid_date_rows"]:
-        warnings.append(f'{sales_import["invalid_date_rows"]} Artikelposten-Zeilen enthalten kein gültiges Buchungsdatum.')
+        warnings.append(_count_sentence(
+            sales_import["invalid_date_rows"],
+            "{count} Artikelposten-Zeile enthält kein gültiges Buchungsdatum.",
+            "{count} Artikelposten-Zeilen enthalten kein gültiges Buchungsdatum.",
+        ))
     if sales_import["invalid_quantity_rows"]:
-        warnings.append(f'{sales_import["invalid_quantity_rows"]} Artikelposten-Zeilen enthalten keine gültige Menge.')
+        warnings.append(_count_sentence(
+            sales_import["invalid_quantity_rows"],
+            "{count} Artikelposten-Zeile enthält keine gültige Menge.",
+            "{count} Artikelposten-Zeilen enthalten keine gültige Menge.",
+        ))
     invalid_current_rows = sum(source.get("invalid_article_rows", 0) for source in current_sources)
     if invalid_current_rows:
-        warnings.append(f"{invalid_current_rows} IST-Zeilen wurden wegen ungültiger Artikelnummern verworfen.")
+        warnings.append(_count_sentence(
+            invalid_current_rows,
+            "{count} IST-Zeile wurde wegen einer ungültigen Artikelnummer verworfen.",
+            "{count} IST-Zeilen wurden wegen ungültiger Artikelnummern verworfen.",
+        ))
     if parameters.get("_parameter_ignored"):
-        warnings.append(f'Nicht erkannte Parameterzeilen: {parameters["_parameter_ignored"]}.')
+        ignored = [part.strip() for part in str(parameters["_parameter_ignored"]).split(",") if part.strip()]
+        warnings.append(_count_sentence(
+            len(ignored),
+            f"1 Parameter wurde nicht erkannt: {parameters['_parameter_ignored']}.",
+            f"{len(ignored)} Parameter wurden nicht erkannt: {parameters['_parameter_ignored']}.",
+        ))
+    if missing_vpe_count:
+        warnings.append(_count_sentence(
+            missing_vpe_count,
+            "Für {count} Artikel fehlt die VPE; die Bestellmenge wurde auf ganze Stück aufgerundet.",
+            "Für {count} Artikel fehlt die VPE; die Bestellmengen wurden auf ganze Stück aufgerundet.",
+        ))
     if validation_count:
-        warnings.append(f"{validation_count} Artikel benötigen eine Plausibilitätsprüfung.")
+        warnings.append(_count_sentence(
+            validation_count,
+            "{count} Artikel benötigt eine Plausibilitätsprüfung.",
+            "{count} Artikel benötigen eine Plausibilitätsprüfung.",
+        ))
 
     meta["warnings"] = warnings
     meta["parameters"] = parameters
@@ -195,4 +236,5 @@ def analyse_workbook(
     meta["current_articles"] = len(current)
     meta["matched_current_articles"] = matched_current_articles
     meta["validation_count"] = validation_count
+    meta["missing_vpe_count"] = missing_vpe_count
     return sorted(results, key=lambda row: (-max(row["sales_total"], 0), row["article_key"])), meta
