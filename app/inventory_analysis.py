@@ -48,6 +48,30 @@ def _is_month_end(value: date) -> bool:
     return value == _month_end(value.year, value.month)
 
 
+def _requested_month_keys(end: date | None, count: int) -> list[tuple[int, int]]:
+    if end is None:
+        return []
+    return [month_shift(end.year, end.month, delta) for delta in range(-(count - 1), 1)]
+
+
+def _first_fully_covered_month(coverage_start: date | None) -> date | None:
+    if coverage_start is None:
+        return None
+    # The first month containing a valid posting is treated as covered. The app
+    # cannot infer an export start date from the day of the first transaction.
+    return _month_start(coverage_start.year, coverage_start.month)
+
+
+def _effective_month_keys(
+    requested_keys: list[tuple[int, int]],
+    coverage_start: date | None,
+) -> list[tuple[int, int]]:
+    first_full = _first_fully_covered_month(coverage_start)
+    if first_full is None:
+        return requested_keys
+    return [key for key in requested_keys if _month_start(*key) >= first_full]
+
+
 def calculate_analysis(
     sales_rows: Iterable[Mapping[str, Any]],
     articles: Mapping[str, str] | None = None,
@@ -58,9 +82,14 @@ def calculate_analysis(
     rows = list(sales_rows)
     document_type = str(params["document_type"])
     return_document_types = params.get("return_document_types", "")
-    months = int(parameter_number(params, "months_average", 3))
-    if not 1 <= months <= 36:
+
+    months_requested = int(parameter_number(params, "months_average", 3))
+    if not 1 <= months_requested <= 36:
         raise ValueError("Durchschnittsmonate müssen zwischen 1 und 36 liegen.")
+
+    xyz_months_requested = int(parameter_number(params, "xyz_months", 12))
+    if not 3 <= xyz_months_requested <= 36:
+        raise ValueError("XYZ-Monate müssen zwischen 3 und 36 liegen.")
 
     xyz_min_months = int(parameter_number(params, "xyz_min_months", 3))
     if not 3 <= xyz_min_months <= 36:
@@ -76,11 +105,14 @@ def calculate_analysis(
         raise ValueError("XYZ-Grenzen müssen 0 <= X < Y erfüllen.")
 
     names = dict(articles or {})
+    article_labels: dict[str, str] = {}
     movements: list[tuple[str, date, float, float, float]] = []
     for row in rows:
         key = normalize_article_key(row.get("article_key") or row.get("article_no"))
         if not key:
             continue
+        display = str(row.get("article_display") or row.get("article_key") or key).strip()
+        article_labels.setdefault(key, display)
         if row.get("description") and not names.get(key):
             names[key] = str(row["description"]).strip()
         day = booking_date(row)
@@ -98,10 +130,7 @@ def calculate_analysis(
     if analysis_start and analysis_end and analysis_start > analysis_end:
         raise ValueError("Das Startdatum darf nicht nach dem Enddatum liegen.")
 
-    # Only fully completed calendar months are used for demand, XYZ and proposals.
     average_end: date | None = None
-    month_keys: list[tuple[int, int]] = []
-    average_start: date | None = None
     partial_month_excluded = False
     if analysis_end:
         if _is_month_end(analysis_end):
@@ -110,13 +139,20 @@ def calculate_analysis(
             previous_year, previous_month = month_shift(analysis_end.year, analysis_end.month, -1)
             average_end = _month_end(previous_year, previous_month)
             partial_month_excluded = True
-        month_keys = [
-            month_shift(average_end.year, average_end.month, delta)
-            for delta in range(-(months - 1), 1)
-        ]
-        first_year, first_month = month_keys[0]
-        average_start = _month_start(first_year, first_month)
-    allowed_months = set(month_keys)
+
+    coverage_candidates = [value for value in (analysis_start, data_start) if value is not None]
+    coverage_start = max(coverage_candidates) if coverage_candidates else None
+
+    average_requested_keys = _requested_month_keys(average_end, months_requested)
+    average_keys = _effective_month_keys(average_requested_keys, coverage_start)
+    xyz_requested_keys = _requested_month_keys(average_end, xyz_months_requested)
+    xyz_keys = _effective_month_keys(xyz_requested_keys, coverage_start)
+
+    average_requested_start = _month_start(*average_requested_keys[0]) if average_requested_keys else None
+    average_start = _month_start(*average_keys[0]) if average_keys else None
+    xyz_requested_start = _month_start(*xyz_requested_keys[0]) if xyz_requested_keys else None
+    xyz_start = _month_start(*xyz_keys[0]) if xyz_keys else None
+    allowed_months = set(average_keys) | set(xyz_keys)
 
     total: dict[str, float] = defaultdict(float)
     gross_total: dict[str, float] = defaultdict(float)
@@ -138,7 +174,6 @@ def calculate_analysis(
         if (day.year, day.month) in allowed_months:
             monthly[key][(day.year, day.month)] += net
 
-    # Master-data-only articles must not create phantom rows in the ABC analysis.
     keys = active_keys
     ranked = sorted(
         ((key, max(total.get(key, 0.0), 0.0)) for key in keys),
@@ -148,6 +183,8 @@ def calculate_analysis(
     cumulative = 0.0
     abc: dict[str, tuple[str, float, float]] = {}
 
+    # The threshold article remains in the better class. Therefore the achieved
+    # cumulative share may be slightly above the configured percentage.
     for key, amount in ranked:
         share = amount / grand_total if grand_total else 0.0
         previous_cumulative = cumulative
@@ -171,24 +208,28 @@ def calculate_analysis(
         for klass, default in {"A": 2, "B": 4, "C": 8}.items()
     }
 
+    average_months_used = len(average_keys)
+    xyz_months_used = len(xyz_keys)
     results: list[dict[str, Any]] = []
     for key in sorted(keys):
         klass, share, cumulative_share = abc.get(key, ("C", 0.0, 1.0 if grand_total else 0.0))
-        values = [monthly[key].get(month_key, 0.0) for month_key in month_keys] if month_keys else []
-        recent_sales = sum(values)
-        average_month = recent_sales / months if months else 0.0
-        deviation = pstdev(values) if values else 0.0
+        average_values = [monthly[key].get(month_key, 0.0) for month_key in average_keys]
+        xyz_values = [monthly[key].get(month_key, 0.0) for month_key in xyz_keys]
+        recent_sales = sum(average_values)
+        average_month = recent_sales / average_months_used if average_months_used else 0.0
+        xyz_average = sum(xyz_values) / xyz_months_used if xyz_months_used else 0.0
+        deviation = pstdev(xyz_values) if xyz_values else 0.0
 
-        if months < xyz_min_months:
+        if xyz_months_used < xyz_min_months:
             variation = None
             xyz = None
-            xyz_reason = f"XYZ benötigt mindestens {xyz_min_months} Durchschnittsmonate."
-        elif average_month <= 0:
+            xyz_reason = f"XYZ benötigt mindestens {xyz_min_months} vollständig abgedeckte Monate."
+        elif xyz_average <= 0:
             variation = None
             xyz = None
-            xyz_reason = "Kein positiver Nettoabsatz im gewählten Durchschnittszeitraum."
+            xyz_reason = "Kein positiver Nettoabsatz im gewählten XYZ-Zeitraum."
         else:
-            variation = deviation / average_month
+            variation = deviation / xyz_average
             xyz = "X" if variation <= x_limit else ("Y" if variation <= y_limit else "Z")
             xyz_reason = None
 
@@ -203,9 +244,10 @@ def calculate_analysis(
             vpe = as_float(raw.get("vpe")) if isinstance(raw, Mapping) else as_float(raw)
         order = round_up_to_vpe(raw_order, vpe) if raw_order > 0 else None
 
-        legacy_values = ([0.0, 0.0, 0.0] + values)[-3:]
+        legacy_values = ([0.0, 0.0, 0.0] + average_values)[-3:]
         results.append({
             "article_key": key,
+            "article_display": article_labels.get(key, key),
             "description": names.get(key, ""),
             "stichtag": analysis_end,
             "period_start": average_start,
@@ -213,7 +255,15 @@ def calculate_analysis(
             "analysis_end": analysis_end,
             "average_start": average_start,
             "average_end": average_end,
-            "months_average": months,
+            "average_requested_start": average_requested_start,
+            "months_average": months_requested,
+            "months_average_requested": months_requested,
+            "months_average_used": average_months_used,
+            "xyz_start": xyz_start,
+            "xyz_end": average_end,
+            "xyz_requested_start": xyz_requested_start,
+            "xyz_months_requested": xyz_months_requested,
+            "xyz_months_used": xyz_months_used,
             "sales_gross": gross_total.get(key, 0.0),
             "returns_total": returns_total.get(key, 0.0),
             "sales_total": total.get(key, 0.0),
@@ -222,7 +272,9 @@ def calculate_analysis(
             "abc_class": klass,
             "sales_recent": recent_sales,
             "average_month": average_month,
-            "monthly_sales": values,
+            "monthly_sales": average_values,
+            "xyz_average_month": xyz_average,
+            "xyz_monthly_sales": xyz_values,
             "sales_m2": legacy_values[0],
             "sales_m1": legacy_values[1],
             "sales_m0": legacy_values[2],
@@ -238,7 +290,7 @@ def calculate_analysis(
             "order_quantity_raw": raw_order,
             "vpe": vpe,
             "order_quantity": order,
-            "proposal_reason": "Kein positiver Nettoabsatz im vollständigen Durchschnittszeitraum." if average_month <= 0 else None,
+            "proposal_reason": "Kein positiver Nettoabsatz in vollständig abgedeckten Durchschnittsmonaten." if average_month <= 0 else None,
         })
 
     counts: dict[str, int] = defaultdict(int)
@@ -256,24 +308,23 @@ def calculate_analysis(
         warnings.append("Die ABC-Analyse enthält keine C-Artikel.")
     if results and counts["A"] == len(results):
         warnings.append("Die ABC-Analyse enthält nur A-Artikel; Grenzwerte oder Datenbasis prüfen.")
-    if months < xyz_min_months:
-        warnings.append(f"Keine XYZ-Klassifizierung: mindestens {xyz_min_months} Durchschnittsmonate erforderlich.")
+    if xyz_months_used < xyz_min_months:
+        warnings.append(f"Keine XYZ-Klassifizierung: mindestens {xyz_min_months} vollständig abgedeckte Monate erforderlich.")
     if partial_month_excluded and analysis_end:
         warnings.append(
             f"Der angebrochene Monat bis {analysis_end:%d.%m.%Y} wurde für Durchschnitt, XYZ und Vorschläge ausgeschlossen."
         )
-    if average_start and requested_start and requested_start > average_start:
+    if average_months_used < months_requested:
         warnings.append(
-            "Der gewählte Analysebeginn liegt innerhalb des Durchschnittsfensters. "
-            "Davorliegende vollständige Monate werden als Absatz 0 berücksichtigt."
+            f"Der Durchschnitt wurde auf {average_months_used} statt {months_requested} vollständig abgedeckte Kalendermonate verkürzt; "
+            "Zeiten vor der erkennbaren Datenabdeckung wurden nicht als Nullmonate gewertet."
         )
-    elif average_start and data_start and (data_start.year, data_start.month) > (average_start.year, average_start.month):
+    if xyz_months_used < xyz_months_requested:
         warnings.append(
-            "Die Quelldaten beginnen nach dem ersten benötigten Durchschnittsmonat. "
-            "Fehlende frühere Monate werden als Absatz 0 berücksichtigt."
+            f"Der XYZ-Zeitraum wurde auf {xyz_months_used} statt {xyz_months_requested} vollständig abgedeckte Kalendermonate verkürzt."
         )
-    if analysis_end and data_end and analysis_end > data_end:
-        warnings.append("Das gewählte Enddatum liegt nach der letzten vorhandenen Verkaufsbewegung.")
+    if analysis_end and data_end and (analysis_end.year, analysis_end.month) > (data_end.year, data_end.month):
+        warnings.append("Das gewählte Enddatum liegt nach dem letzten Monat mit einer Verkaufsbewegung.")
 
     return results, {
         "stichtag": analysis_end,
@@ -282,14 +333,24 @@ def calculate_analysis(
         "analysis_end": analysis_end,
         "average_start": average_start,
         "average_end": average_end,
-        "months_average": months,
+        "average_requested_start": average_requested_start,
+        "months_average": months_requested,
+        "months_average_requested": months_requested,
+        "months_average_used": average_months_used,
+        "xyz_start": xyz_start,
+        "xyz_end": average_end,
+        "xyz_requested_start": xyz_requested_start,
+        "xyz_months_requested": xyz_months_requested,
+        "xyz_months_used": xyz_months_used,
         "data_start": data_start,
         "data_end": data_end,
+        "coverage_start": coverage_start,
         "rows_in_analysis": rows_in_analysis,
         "overall_gross_sales": sum(gross_total.values()),
         "overall_returns": sum(returns_total.values()),
         "overall_sales": sum(total.values()),
         "abc_sales_basis": grand_total,
+        "abc_rule": "Der Grenzartikel bleibt in der besseren Klasse; dadurch kann der erreichte Anteil die Grenze leicht überschreiten.",
         "counts": dict(counts),
         "warnings": warnings,
     }
