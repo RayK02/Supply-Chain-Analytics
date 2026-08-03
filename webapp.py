@@ -40,6 +40,15 @@ _NEW_DOWNLOAD_GUIDANCE = (
     'Deshalb oben dieselben Dateien erneut auswählen und «Direkt als XLSX – ohne Webansicht» klicken.">'
     'Für XLSX: Dateien oben erneut auswählen</span>'
 )
+_OLD_UPLOAD_NOTE = "Web-Upload: insgesamt maximal ca. 4 MB."
+_NEW_UPLOAD_NOTE = (
+    "Web-Upload: Die Dateien werden nacheinander verarbeitet; jede einzelne Datei darf maximal ca. 4,1 MB gross sein."
+)
+_OLD_CLIENT_MESSAGES = '<div id="clientError" class="message error" hidden></div>'
+_NEW_CLIENT_MESSAGES = (
+    '<div id="clientStatus" class="message warning" role="status" aria-live="polite" hidden></div>\n'
+    '      <div id="clientError" class="message error" role="alert" hidden></div>'
+)
 
 
 @app.after_request
@@ -60,7 +69,11 @@ def security_headers(response):
 
 def _render_page(**context: Any) -> str:
     html = render_template("index.html", **context)
-    return html.replace(_OLD_DOWNLOAD_GUIDANCE, _NEW_DOWNLOAD_GUIDANCE)
+    return (
+        html.replace(_OLD_DOWNLOAD_GUIDANCE, _NEW_DOWNLOAD_GUIDANCE)
+        .replace(_OLD_UPLOAD_NOTE, _NEW_UPLOAD_NOTE)
+        .replace(_OLD_CLIENT_MESSAGES, _NEW_CLIENT_MESSAGES)
+    )
 
 
 def _render_index(
