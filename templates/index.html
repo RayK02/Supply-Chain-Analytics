@@ -23,6 +23,10 @@
         <h2>Arbeitsmappen analysieren</h2>
         <p>Die Analyse-Datei liefert Artikelposten, Artikelstamm und VPE. Zusätzliche IST-Dateien liefern die aktuellsten Lagerhaltungsdaten.</p>
       </div>
+      <div class="message warning">
+        <strong>Öffentliche Webversion ohne Zugriffsschutz.</strong>
+        Wer die URL kennt, kann die App verwenden und Dateien hochladen. Für vertrauliche oder produktive Firmendaten ist die lokale Version vorgesehen.
+      </div>
       <form id="analysisForm" data-settings-submitted="{{ 'true' if settings_submitted else 'false' }}" data-storage="localStorage" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data" class="upload-form upload-grid">
         <label class="file-field">
           <strong>1. Analyse-Arbeitsmappe</strong>
@@ -65,7 +69,7 @@
 
         <div class="form-actions">
           <button type="submit" name="output_mode" value="view">Analyse anzeigen</button>
-          <button type="submit" name="output_mode" value="download" class="secondary strong">Direkt als XLSX</button>
+          <button type="submit" name="output_mode" value="download" class="secondary strong">Direkt als XLSX – ohne Webansicht</button>
         </div>
       </form>
       <div id="clientError" class="message error" hidden></div>
@@ -112,11 +116,7 @@
             <p class="source-list warning-text">Keine IST-Lagerhaltungsdaten erkannt.</p>
           {% endif %}
         </div>
-        {% if export_uri %}
-          <a class="download" href="{{ export_uri }}" download="{{ export_filename }}">XLSX herunterladen</a>
-        {% else %}
-          <span class="download disabled" title="Für grosse Auswertungen den direkten XLSX-Modus verwenden">Direkten XLSX-Modus verwenden</span>
-        {% endif %}
+        <span class="download disabled" title="Für einen XLSX-Export oben den direkten XLSX-Modus wählen">XLSX über Direktmodus</span>
       </section>
 
       <section class="kpis seven">
