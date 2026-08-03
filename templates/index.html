@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Lagerhaltungsdaten Analyse</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app-extra.css') }}">
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
 </head>
 <body>
   <header class="hero">
@@ -21,7 +23,7 @@
         <h2>Arbeitsmappen analysieren</h2>
         <p>Die Analyse-Datei liefert Artikelposten, Artikelstamm und VPE. Zusätzliche IST-Dateien liefern die aktuellsten Lagerhaltungsdaten.</p>
       </div>
-      <form id="analysisForm" data-settings-submitted="{{ 'true' if settings_submitted else 'false' }}" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data" class="upload-form upload-grid">
+      <form id="analysisForm" data-settings-submitted="{{ 'true' if settings_submitted else 'false' }}" data-storage="localStorage" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data" class="upload-form upload-grid">
         <label class="file-field">
           <strong>1. Analyse-Arbeitsmappe</strong>
           <span>Erforderlich: Artikelposten; optional Artikel_Stamm, VPE, Parameter und Lagerhaltungsdaten_IST.</span>
@@ -33,30 +35,38 @@
           <input id="currentFiles" type="file" name="current_files" accept=".xlsx" multiple>
         </label>
 
-        <fieldset class="analysis-settings">
+        <fieldset class="analysis-settings four">
           <legend>3. Berechnungslogik</legend>
           <label class="setting-field">
             <strong>Durchschnittsmonate</strong>
-            <span>Vollständig abgeschlossene Kalendermonate. Leer = Wert aus dem Parameterblatt, sonst Standard 3.</span>
+            <span>Für Ø Monatsabsatz, Mindestbestand und Bestellmenge. Leer = Parameterblatt, sonst Standard 3.</span>
             <input id="monthsAverage" type="number" name="months_average" min="1" max="36" step="1" placeholder="3" value="{{ analysis_settings.months_average }}">
           </label>
           <label class="setting-field">
+            <strong>XYZ-Monate</strong>
+            <span>Separater Zeitraum für die Verbrauchsschwankung. Leer = Parameterblatt, sonst Standard 12.</span>
+            <input id="xyzMonths" type="number" name="xyz_months" min="3" max="36" step="1" placeholder="12" value="{{ analysis_settings.xyz_months }}">
+          </label>
+          <label class="setting-field">
             <strong>Startdatum Analyse</strong>
-            <span>Erster eingeschlossener Tag für Nettoabsatz und ABC. Leer = erste relevante Verkaufsbewegung der Datei.</span>
+            <span>Erster eingeschlossener Tag für Nettoabsatz und ABC. Leer = erste relevante Verkaufsbewegung.</span>
             <input id="analysisStartDate" type="date" name="analysis_start_date" value="{{ analysis_settings.analysis_start_date }}">
           </label>
           <label class="setting-field">
             <strong>Enddatum Analyse</strong>
-            <span>Letzter eingeschlossener Tag. Ein angebrochener Endmonat wird bei Durchschnitt, XYZ und Vorschlägen nicht verwendet.</span>
+            <span>Letzter eingeschlossener Tag. Ein angebrochener Endmonat wird für Durchschnitt und XYZ ausgeschlossen.</span>
             <input id="analysisEndDate" type="date" name="analysis_end_date" value="{{ analysis_settings.analysis_end_date }}">
           </label>
           <p class="storage-note">
-            Nur diese drei Einstellungen werden lokal in diesem Browser gespeichert. Excel-Dateien und Ergebnisse werden nicht dauerhaft gespeichert.
+            Nur diese vier Einstellungen werden lokal in diesem Browser gespeichert. Excel-Dateien und Ergebnisse werden nicht dauerhaft gespeichert.
             Web-Upload: insgesamt maximal ca. 4 MB.
           </p>
         </fieldset>
 
-        <button type="submit">Analyse starten</button>
+        <div class="form-actions">
+          <button type="submit" name="output_mode" value="view">Analyse anzeigen</button>
+          <button type="submit" name="output_mode" value="download" class="secondary strong">Direkt als XLSX</button>
+        </div>
       </form>
       <div id="clientError" class="message error" hidden></div>
     </section>
@@ -76,15 +86,24 @@
             · {{ result_count_total or results|length }} Artikel
           </p>
           <p class="source-list">
-            <strong>Durchschnitt:</strong> {{ meta.months_average }} vollständige Kalendermonate
+            <strong>Durchschnitt:</strong> {{ meta.months_average_used }} vollständige Kalendermonate verwendet ({{ meta.months_average_requested }} angefordert)
             ({{ meta.average_start.strftime('%d.%m.%Y') if meta.average_start else '–' }}
             bis {{ meta.average_end.strftime('%d.%m.%Y') if meta.average_end else '–' }})
           </p>
           <p class="source-list">
+            <strong>XYZ:</strong> {{ meta.xyz_months_used }} vollständige Kalendermonate verwendet ({{ meta.xyz_months_requested }} angefordert)
+            ({{ meta.xyz_start.strftime('%d.%m.%Y') if meta.xyz_start else '–' }}
+            bis {{ meta.xyz_end.strftime('%d.%m.%Y') if meta.xyz_end else '–' }})
+          </p>
+          <p class="source-list">
             <strong>Absatz:</strong> Brutto {{ '%.0f'|format(meta.overall_gross_sales or 0) }}
-            · Rückläufe {{ '%.0f'|format(meta.overall_returns or 0) }}
+            · Rückläufe netto {{ '%+.0f'|format(meta.overall_returns or 0) }}
             · Netto {{ '%.0f'|format(meta.overall_sales or 0) }}
           </p>
+          <p class="source-list"><strong>ABC-Regel:</strong> {{ meta.abc_rule }}</p>
+          {% if meta.parameters %}
+            <p class="source-list"><strong>Parameterquelle:</strong> {{ meta.parameters.get('_parameter_source', 'Standardwerte') }}</p>
+          {% endif %}
           {% if current_filenames %}
             <p class="source-list"><strong>Zusätzliche IST-Dateien:</strong> {{ current_filenames|join(', ') }}</p>
           {% elif meta.current_sources %}
@@ -96,17 +115,18 @@
         {% if export_uri %}
           <a class="download" href="{{ export_uri }}" download="{{ export_filename }}">XLSX herunterladen</a>
         {% else %}
-          <span class="download disabled" title="Export ist für die Web-Antwort zu gross">Export nicht verfügbar</span>
+          <span class="download disabled" title="Für grosse Auswertungen den direkten XLSX-Modus verwenden">Direkten XLSX-Modus verwenden</span>
         {% endif %}
       </section>
 
-      <section class="kpis six">
+      <section class="kpis seven">
         <article><span>Artikel</span><strong>{{ result_count_total or results|length }}</strong></article>
         <article class="abc a"><span>A-Artikel</span><strong>{{ meta.counts.get('A', 0) }}</strong></article>
         <article class="abc b"><span>B-Artikel</span><strong>{{ meta.counts.get('B', 0) }}</strong></article>
         <article class="abc c"><span>C-Artikel</span><strong>{{ meta.counts.get('C', 0) }}</strong></article>
         <article><span>IST-Artikel</span><strong>{{ meta.current_articles or 0 }}</strong></article>
         <article><span>Plausibilität prüfen</span><strong>{{ meta.validation_count or 0 }}</strong></article>
+        <article><span>VPE fehlt</span><strong>{{ meta.missing_vpe_count or 0 }}</strong></article>
       </section>
 
       {% if meta.warnings %}
@@ -129,21 +149,21 @@
           <table id="resultsTable">
             <thead><tr>
               <th>Artikel</th><th>Beschreibung</th><th>ABC</th><th>XYZ</th><th>ABCXYZ</th>
-              <th>Bruttoabgang</th><th>Rückläufe</th><th>Nettoabsatz</th><th>Ø Monat</th><th>Lagerbestand IST</th>
+              <th>Bruttoabgang</th><th>Rückläufe netto</th><th>Nettoabsatz</th><th>Ø Monat</th><th>Lagerbestand IST</th>
               <th>Mindestbestand neu</th><th>Minimalbestand IST</th><th>Δ</th>
               <th>Bestellmenge neu</th><th>Bestellmenge IST</th><th>Δ</th>
               <th>Maximalbestand IST</th><th>VPE</th><th>Lagerort</th><th>IST-Quelle</th><th>Plausibilitätsprüfung</th><th>Status</th>
             </tr></thead>
             <tbody>
             {% for row in results %}
-              <tr data-search="{{ (row.article_key ~ ' ' ~ row.description)|lower }}" data-abc="{{ row.abc_class }}" data-xyz="{{ row.xyz_class }}" data-status="{{ row.overall_status }}">
-                <td class="mono">{{ row.article_key }}</td>
+              <tr data-search="{{ (row.article_display ~ ' ' ~ row.description)|lower }}" data-abc="{{ row.abc_class }}" data-xyz="{{ row.xyz_class }}" data-status="{{ row.overall_status }}">
+                <td class="mono">{{ row.article_display }}</td>
                 <td>{{ row.description }}</td>
                 <td><span class="pill abc-{{ row.abc_class|lower }}">{{ row.abc_class }}</span></td>
                 <td><span class="pill xyz">{{ row.xyz_class }}</span></td>
                 <td><strong>{{ row.abcxyz }}</strong></td>
                 <td>{{ '%.0f'|format(row.sales_gross) }}</td>
-                <td>{{ '%.0f'|format(row.returns_total) }}</td>
+                <td>{{ '%+.0f'|format(row.returns_total) }}</td>
                 <td>{{ '%.0f'|format(row.sales_total) }}</td>
                 <td>{{ '%.1f'|format(row.average_month) }}</td>
                 <td>{{ '%.0f'|format(row.stock_current) if row.stock_current is not none else '–' }}</td>
@@ -174,78 +194,5 @@
       </section>
     {% endif %}
   </main>
-
-<script>
-(() => {
-  const form = document.getElementById('analysisForm');
-  if (form) {
-    const storageKey = 'lagerhaltungsdaten.analysisSettings.v1';
-    const fields = {
-      months_average: document.getElementById('monthsAverage'),
-      analysis_start_date: document.getElementById('analysisStartDate'),
-      analysis_end_date: document.getElementById('analysisEndDate')
-    };
-    const saveSettings = () => {
-      try {
-        localStorage.setItem(storageKey, JSON.stringify({
-          months_average: fields.months_average.value,
-          analysis_start_date: fields.analysis_start_date.value,
-          analysis_end_date: fields.analysis_end_date.value
-        }));
-      } catch (_) {}
-    };
-    if (form.dataset.settingsSubmitted !== 'true') {
-      try {
-        const saved = JSON.parse(localStorage.getItem(storageKey) || '{}');
-        Object.entries(fields).forEach(([key, element]) => {
-          if (saved[key] !== undefined && saved[key] !== null) element.value = saved[key];
-        });
-      } catch (_) {}
-    } else {
-      saveSettings();
-    }
-    Object.values(fields).forEach(element => element.addEventListener('change', saveSettings));
-
-    form.addEventListener('submit', event => {
-      saveSettings();
-      const files = [
-        ...document.getElementById('analysisFile').files,
-        ...document.getElementById('currentFiles').files
-      ];
-      const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
-      const errorBox = document.getElementById('clientError');
-      if (totalBytes > 3.8 * 1024 * 1024) {
-        event.preventDefault();
-        errorBox.hidden = false;
-        errorBox.textContent = 'Die ausgewählten Dateien sind zusammen zu gross. Bitte unter ca. 3,8 MB bleiben oder die lokale Version verwenden.';
-      } else {
-        errorBox.hidden = true;
-      }
-    });
-  }
-
-  const table = document.getElementById('resultsTable');
-  if (!table) return;
-  const search = document.getElementById('search');
-  const abc = document.getElementById('abc');
-  const xyz = document.getElementById('xyz');
-  const status = document.getElementById('status');
-  const count = document.getElementById('visibleCount');
-  const rows = [...table.tBodies[0].rows];
-  const apply = () => {
-    const term = search.value.trim().toLowerCase();
-    let visible = 0;
-    rows.forEach(row => {
-      const show = (!term || row.dataset.search.includes(term)) && (!abc.value || row.dataset.abc === abc.value) && (!xyz.value || row.dataset.xyz === xyz.value) && (!status.value || row.dataset.status === status.value);
-      row.hidden = !show;
-      if (show) visible++;
-    });
-    count.textContent = `${visible} von ${rows.length} geladenen Artikeln angezeigt`;
-  };
-  [search, abc, xyz, status].forEach(element => element.addEventListener('input', apply));
-  document.getElementById('resetFilters').addEventListener('click', () => { search.value=''; abc.value=''; xyz.value=''; status.value=''; apply(); });
-  apply();
-})();
-</script>
 </body>
 </html>
