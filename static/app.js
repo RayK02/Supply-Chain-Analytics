@@ -13,9 +13,23 @@
     const currentInput = document.getElementById('currentFiles');
     const errorBox = document.getElementById('clientError');
     const statusBox = document.getElementById('clientStatus');
-    const submitButtons = [...form.querySelectorAll('button[type="submit"]')];
-    const maxSingleFileBytes = 4_100_000;
-    const maxRequestBytes = 4_300_000;
+    const calculationFieldset = form.querySelector('.analysis-settings');
+    const submitButtons = [...form.querySelectorAll('.form-actions button[type="submit"]')];
+    const maxSingleFileBytes = 4_430_000;
+    const maxRequestBytes = 4_430_000;
+
+    let preparedToken = null;
+    let preparedSignature = '';
+    let preparedRange = null;
+
+    const prepareWrap = document.createElement('div');
+    prepareWrap.className = 'form-actions prepare-actions';
+    const prepareButton = document.createElement('button');
+    prepareButton.type = 'button';
+    prepareButton.id = 'prepareFiles';
+    prepareButton.textContent = 'Dateien einlesen';
+    prepareWrap.appendChild(prepareButton);
+    calculationFieldset.parentNode.insertBefore(prepareWrap, calculationFieldset);
 
     const saveSettings = () => {
       try {
@@ -26,8 +40,14 @@
     };
 
     const setBusy = busy => {
-      submitButtons.forEach(button => { button.disabled = busy; });
+      prepareButton.disabled = busy;
+      submitButtons.forEach(button => { button.disabled = busy || !preparedToken; });
       form.setAttribute('aria-busy', busy ? 'true' : 'false');
+    };
+
+    const setPrepared = prepared => {
+      calculationFieldset.disabled = !prepared;
+      submitButtons.forEach(button => { button.disabled = !prepared; });
     };
 
     const showStatus = message => {
@@ -70,6 +90,36 @@
       return plain ? plain[1] : 'Lagerhaltungsanalyse.xlsx';
     };
 
+    const formatSize = bytes => `${(bytes / 1_000_000).toFixed(2)} MB`;
+
+    const fileSignature = () => {
+      const analysisFile = analysisInput.files[0];
+      const currentFiles = [...currentInput.files];
+      return [analysisFile, ...currentFiles]
+        .filter(Boolean)
+        .map(file => `${file.name}:${file.size}:${file.lastModified}`)
+        .join('|');
+    };
+
+    const selectedFileSummary = () => {
+      const analysisFile = analysisInput.files[0];
+      const currentFiles = [...currentInput.files];
+      if (!analysisFile) return '';
+      const currentSize = currentFiles.reduce((sum, file) => sum + file.size, 0);
+      return `Analyse-Datei ${formatSize(analysisFile.size)}${currentFiles.length ? ` · ${currentFiles.length} IST-Datei(en) zusammen ${formatSize(currentSize)}` : ''}`;
+    };
+
+    const invalidatePreparedData = () => {
+      preparedToken = null;
+      preparedSignature = '';
+      preparedRange = null;
+      setPrepared(false);
+      const summary = selectedFileSummary();
+      if (summary) {
+        showStatus(`${summary}. Bitte «Dateien einlesen» wählen. Danach können Zeitraum und Berechnungslogik eingestellt werden.`);
+      }
+    };
+
     if (form.dataset.settingsSubmitted !== 'true') {
       try {
         const savedText = localStorage.getItem(storageKey) || localStorage.getItem(legacyStorageKey) || '{}';
@@ -82,50 +132,92 @@
       saveSettings();
     }
     Object.values(fields).forEach(element => element.addEventListener('change', saveSettings));
+    analysisInput.addEventListener('change', invalidatePreparedData);
+    currentInput.addEventListener('change', invalidatePreparedData);
+    setPrepared(false);
 
-    form.addEventListener('submit', async event => {
-      event.preventDefault();
-      saveSettings();
-
+    prepareButton.addEventListener('click', async () => {
       const analysisFile = analysisInput.files[0];
       const currentFiles = [...currentInput.files];
-      const outputMode = event.submitter?.value || 'view';
       const allFiles = analysisFile ? [analysisFile, ...currentFiles] : currentFiles;
 
       if (!analysisFile) {
         showError('Bitte die Analyse-Arbeitsmappe auswählen.');
         return;
       }
+
       const oversized = allFiles.find(file => file.size > maxSingleFileBytes);
       if (oversized) {
-        showError(`${oversized.name} ist grösser als ca. 4,1 MB. Bitte diese einzelne Datei verkleinern oder die lokale Version verwenden.`);
+        showError(`${oversized.name} hat ${formatSize(oversized.size)}. Die Webversion kann wegen des Vercel-Limits maximal ca. 4,43 MB pro Einzeldatei verarbeiten.`);
         return;
       }
 
       setBusy(true);
       try {
-        showStatus('1. Analyse-Arbeitsmappe wird verarbeitet …');
+        showStatus(`1. Analyse-Arbeitsmappe (${formatSize(analysisFile.size)}) wird eingelesen …`);
         const preparation = new FormData();
         preparation.append('analysis_file', analysisFile);
-        appendSettings(preparation);
-        let { token } = await postJson('/api/prepare-analysis', preparation);
+        const prepared = await postJson('/api/prepare-analysis', preparation);
+        let token = prepared.token;
 
         for (let index = 0; index < currentFiles.length; index += 1) {
           const currentFile = currentFiles[index];
           if (currentFile.size + token.length > maxRequestBytes) {
-            throw new Error(`${currentFile.name} ist zusammen mit dem temporären Analysestatus zu gross für die Webversion.`);
+            throw new Error(`${currentFile.name} kann nicht zusammen mit dem bereits vorbereiteten Analysestatus übertragen werden. Bitte diese IST-Datei verkleinern oder die lokale Version verwenden.`);
           }
-          showStatus(`2. Lagerhaltungsdaten ${index + 1} von ${currentFiles.length} werden ergänzt …`);
+          showStatus(`2. Lagerhaltungsdaten ${index + 1} von ${currentFiles.length} (${formatSize(currentFile.size)}) werden eingelesen …`);
           const currentData = new FormData();
           currentData.append('analysis_token', token);
           currentData.append('current_file', currentFile);
           ({ token } = await postJson('/api/add-current', currentData));
         }
 
-        showStatus(outputMode === 'download' ? '3. XLSX wird erstellt …' : '3. Ergebnisansicht wird erstellt …');
+        preparedToken = token;
+        preparedSignature = fileSignature();
+        preparedRange = {
+          start: prepared.data_start,
+          end: prepared.data_end,
+          rows: prepared.sales_rows
+        };
+        setPrepared(true);
+
+        const rangeText = preparedRange.start && preparedRange.end
+          ? ` Datenabdeckung der Artikelposten: ${preparedRange.start.split('-').reverse().join('.')} bis ${preparedRange.end.split('-').reverse().join('.')} (${preparedRange.rows} eingelesene Zeilen).`
+          : '';
+        showStatus(`Dateien vollständig eingelesen.${rangeText} Jetzt Start-/Enddatum, Durchschnittsmonate und XYZ-Monate festlegen und danach die Analyse starten.`);
+      } catch (error) {
+        preparedToken = null;
+        preparedSignature = '';
+        preparedRange = null;
+        setPrepared(false);
+        showError(error instanceof Error ? error.message : 'Die Dateien konnten nicht eingelesen werden.');
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      saveSettings();
+
+      if (!preparedToken || preparedSignature !== fileSignature()) {
+        showError('Bitte zuerst die ausgewählten Dateien mit «Dateien einlesen» vorbereiten. Danach können die Berechnungsparameter geändert werden.');
+        return;
+      }
+
+      if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+      }
+
+      const outputMode = event.submitter?.value || 'view';
+      setBusy(true);
+      try {
+        showStatus(outputMode === 'download' ? 'Analyse wird berechnet und XLSX erstellt …' : 'Analyse wird mit den aktuell eingestellten Parametern berechnet …');
         const finalData = new FormData();
-        finalData.append('analysis_token', token);
+        finalData.append('analysis_token', preparedToken);
         finalData.append('output_mode', outputMode);
+        appendSettings(finalData);
         const response = await fetch('/api/finalize-analysis', {
           method: 'POST',
           body: finalData,
@@ -143,8 +235,7 @@
           link.click();
           link.remove();
           URL.revokeObjectURL(objectUrl);
-          showStatus('XLSX wurde erstellt. Die ausgewählten Dateien bleiben für eine weitere Analyse erhalten.');
-          setBusy(false);
+          showStatus('XLSX wurde erstellt. Die vorbereiteten Dateien bleiben aktiv; Parameter können geändert und erneut berechnet werden.');
           return;
         }
 
@@ -154,6 +245,7 @@
         document.close();
       } catch (error) {
         showError(error instanceof Error ? error.message : 'Die Analyse konnte nicht abgeschlossen werden.');
+      } finally {
         setBusy(false);
       }
     });
