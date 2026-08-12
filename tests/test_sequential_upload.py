@@ -50,13 +50,7 @@ def current_workbook() -> Workbook:
 def prepare_token(client) -> str:
     response = client.post(
         "/api/prepare-analysis",
-        data={
-            "analysis_file": (workbook_stream(analysis_workbook()), "analysis.xlsx"),
-            "months_average": "1",
-            "xyz_months": "3",
-            "analysis_start_date": "",
-            "analysis_end_date": "",
-        },
+        data={"analysis_file": (workbook_stream(analysis_workbook()), "analysis.xlsx")},
         content_type="multipart/form-data",
     )
     assert response.status_code == 200
@@ -139,7 +133,7 @@ def test_sequential_api_adds_current_workbook_and_renders_result():
     assert "current.xlsx" in text
     assert "A-100" in text
     assert "KELLERA" in text
-    assert "Die Dateien werden nacheinander verarbeitet" in text
+    assert "Dateien zuerst einlesen, danach Zeitraum und Berechnungslogik festlegen" in text
 
 
 def test_sequential_api_download_uses_existing_python_export():
@@ -189,6 +183,6 @@ def test_index_explains_single_file_limit_and_has_progress_region():
     text = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert "jede einzelne Datei darf maximal ca. 4,1 MB gross sein" in text
+    assert "jede einzelne Datei darf maximal ca. 4,43 MB gross sein" in text
     assert 'id="clientStatus"' in text
     assert "zusammen zu gross" not in text
