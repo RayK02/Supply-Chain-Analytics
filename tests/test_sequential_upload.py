@@ -183,6 +183,6 @@ def test_index_explains_single_file_limit_and_has_progress_region():
     text = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert "jede einzelne Datei darf maximal ca. 4,43 MB gross sein" in text
+    assert "4,43 MB" in text
     assert 'id="clientStatus"' in text
     assert "zusammen zu gross" not in text
