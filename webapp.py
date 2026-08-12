@@ -8,6 +8,7 @@ from typing import Any
 from flask import Flask, jsonify, redirect, render_template, request, send_file, url_for
 
 from analysis_service import (
+    _apply_analysis_settings,
     add_current_workbook,
     analyse_workbook,
     finalize_prepared_analysis,
@@ -17,9 +18,10 @@ from analysis_token import AnalysisTokenError, decode_analysis_token, encode_ana
 from inventory import build_export
 
 app = Flask(__name__)
-# Vercel rejects request bodies around 4.5 MB before Flask can handle them.
-# The browser therefore transfers workbooks one at a time.
-app.config["MAX_CONTENT_LENGTH"] = 4_400_000
+# Vercel rejects request bodies at 4.5 MB before Flask can handle them.
+# Workbooks are therefore transferred one at a time and the browser keeps
+# enough headroom for multipart framing below the platform limit.
+app.config["MAX_CONTENT_LENGTH"] = 4_490_000
 
 APP_COMMIT = os.environ.get("VERCEL_GIT_COMMIT_SHA", "local")
 DEFAULT_ANALYSIS_SETTINGS = {
@@ -42,7 +44,8 @@ _NEW_DOWNLOAD_GUIDANCE = (
 )
 _OLD_UPLOAD_NOTE = "Web-Upload: insgesamt maximal ca. 4 MB."
 _NEW_UPLOAD_NOTE = (
-    "Web-Upload: Die Dateien werden nacheinander verarbeitet; jede einzelne Datei darf maximal ca. 4,1 MB gross sein."
+    "Web-Upload: Dateien zuerst einlesen, danach Zeitraum und Berechnungslogik festlegen. "
+    "Jede einzelne Datei darf maximal ca. 4,43 MB gross sein."
 )
 _OLD_CLIENT_MESSAGES = '<div id="clientError" class="message error" hidden></div>'
 _NEW_CLIENT_MESSAGES = (
@@ -221,10 +224,17 @@ def _render_results(
     )
 
 
+def _payload_date_range(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    dates = [row[3] for row in payload.get("sales", []) if isinstance(row, list) and len(row) == 6 and isinstance(row[3], date)]
+    if not dates:
+        return None, None
+    return min(dates).isoformat(), max(dates).isoformat()
+
+
 @app.post("/api/prepare-analysis")
 def prepare_analysis_api():
+    """Read the analysis workbook only; UI settings are deliberately applied later."""
     try:
-        analysis_options, display_settings = _analysis_settings_from_form()
         analysis_file = request.files.get("analysis_file")
         if not analysis_file or not analysis_file.filename:
             return _api_error("Bitte die Analyse-Arbeitsmappe auswählen.")
@@ -234,11 +244,16 @@ def prepare_analysis_api():
 
         payload = prepare_analysis_workbook(
             analysis_file.stream,
-            analysis_options,
+            None,
             source_filename=analysis_file.filename,
         )
-        payload["display_settings"] = display_settings
-        return jsonify({"token": encode_analysis_token(payload)})
+        data_start, data_end = _payload_date_range(payload)
+        return jsonify({
+            "token": encode_analysis_token(payload),
+            "data_start": data_start,
+            "data_end": data_end,
+            "sales_rows": len(payload.get("sales", [])),
+        })
     except (ValueError, AnalysisTokenError) as exc:
         return _api_error(str(exc))
     except Exception:
@@ -267,7 +282,11 @@ def add_current_api():
 @app.post("/api/finalize-analysis")
 def finalize_analysis_api():
     try:
+        analysis_options, display_settings = _analysis_settings_from_form()
         payload = decode_analysis_token(request.form.get("analysis_token", ""))
+        # The workbook is already prepared. Apply the values currently visible in
+        # the UI now, immediately before the one and only calculation.
+        payload["parameters"] = _apply_analysis_settings(dict(payload["parameters"]), analysis_options)
         results, meta = finalize_prepared_analysis(payload)
         if request.form.get("output_mode") == "download":
             return _send_export(results, meta)
@@ -276,7 +295,7 @@ def finalize_analysis_api():
             meta,
             source_filename=payload["source_filename"],
             current_filenames=list(payload["current_filenames"]),
-            analysis_settings=dict(payload.get("display_settings") or DEFAULT_ANALYSIS_SETTINGS),
+            analysis_settings=display_settings,
         )
     except (ValueError, AnalysisTokenError) as exc:
         return _api_error(str(exc))
@@ -349,13 +368,14 @@ def analyze():
 
 @app.errorhandler(413)
 def too_large(_error):
+    message = (
+        "Eine einzelne Datei überschreitet das Web-Limit. Vercel akzeptiert pro Anfrage maximal 4,5 MB; "
+        "die App lässt deshalb etwa 4,43 MB pro Einzeldatei zu. Bitte die Datei verkleinern oder die lokale Version verwenden."
+    )
     if request.path.startswith("/api/"):
-        return _api_error(
-            "Eine einzelne Datei ist für den Web-Upload zu gross. Bitte die Datei unter ca. 4,1 MB verkleinern oder die lokale Version verwenden.",
-            status=413,
-        )
+        return _api_error(message, status=413)
     return _render_index(
-        error="Eine einzelne Datei ist für den Web-Upload zu gross. Bitte die Datei unter ca. 4,1 MB verkleinern oder die lokale Version verwenden.",
+        error=message,
         status=413,
         settings_submitted=False,
     )
