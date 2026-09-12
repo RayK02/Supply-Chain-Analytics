@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="theme-color" content="#07131c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Pocket Terminal</title>
+  <link rel="stylesheet" href="./pocket-terminal.css">
+  <script defer src="./pocket-terminal.js"></script>
+</head>
+<body>
+  <main class="game-shell">
+    <header class="topbar">
+      <div>
+        <div class="label">Credits</div>
+        <div id="cash" class="cash">0</div>
+      </div>
+      <div class="rate-box">
+        <div class="label">Terminal output</div>
+        <div id="rate" class="rate">+0 / s</div>
+      </div>
+    </header>
+
+    <section id="tab-terminal" class="tab is-active">
+      <div class="yard card">
+        <div class="yard-copy">
+          <strong>Pocket Terminal</strong>
+          <span id="yardTier">Tiny freight yard</span>
+        </div>
+        <div class="sky-glow"></div>
+        <div class="warehouse"><span>PT</span></div>
+        <div class="cargo-stack">▣ ▣<br>▣ ▣ ▣</div>
+        <div id="assetTrain" class="asset asset-train">▰▰</div>
+        <div id="assetTruck" class="asset asset-truck">▰◉◉</div>
+        <div id="assetCrane" class="asset asset-crane">┏━┓</div>
+        <button id="tapCargo" class="tap-button" type="button">
+          HANDLE CARGO <span id="tapValue">+1</span>
+        </button>
+      </div>
+
+      <div class="progress-card card">
+        <div class="row">
+          <div>
+            <strong>Terminal expansion</strong>
+            <div id="milestoneBonus" class="subtle">Next bonus: x2 output</div>
+          </div>
+          <span id="milestoneText" class="subtle">0 / 25 upgrades</span>
+        </div>
+        <progress id="milestoneProgress" max="25" value="0"></progress>
+      </div>
+
+      <div class="section-head">
+        <div>
+          <h2>Operations</h2>
+          <span class="subtle">Automate the yard</span>
+        </div>
+        <div id="buyMode" class="segmented" aria-label="Buy amount">
+          <button type="button" data-mode="1" class="is-active">x1</button>
+          <button type="button" data-mode="10">x10</button>
+          <button type="button" data-mode="max">MAX</button>
+        </div>
+      </div>
+      <div id="upgradeList" class="upgrade-list"></div>
+    </section>
+
+    <section id="tab-dispatch" class="tab">
+      <div class="section-head solo">
+        <div>
+          <h2>Dispatch</h2>
+          <span class="subtle">Short-term boosts</span>
+        </div>
+      </div>
+
+      <article class="panel card">
+        <div class="panel-icon">⚡</div>
+        <div>
+          <h3>Double Shift</h3>
+          <p>Double all passive income for 60 seconds.</p>
+        </div>
+        <button id="doubleShift" class="action primary" type="button"></button>
+      </article>
+
+      <article class="panel card">
+        <div class="panel-icon">🚨</div>
+        <div>
+          <h3>Rush Order</h3>
+          <p>Instantly bank 60 seconds of current production.</p>
+        </div>
+        <button id="rushOrder" class="action" type="button"></button>
+      </article>
+
+      <article class="panel card">
+        <div class="panel-icon">✨</div>
+        <div>
+          <h3>Golden Cargo Radar</h3>
+          <p>Unlock random golden cargo bonuses while the game is open.</p>
+        </div>
+        <button id="radarButton" class="action" type="button"></button>
+      </article>
+    </section>
+
+    <section id="tab-network" class="tab">
+      <div class="section-head solo">
+        <div>
+          <h2>Network Expansion</h2>
+          <span class="subtle">Prestige for permanent power</span>
+        </div>
+      </div>
+
+      <article class="panel card prestige-card">
+        <div class="panel-icon">◆</div>
+        <div>
+          <h3>Logistics Tokens: <span id="tokens">0</span></h3>
+          <p>Each token permanently grants +20% passive output and +10% tap value.</p>
+        </div>
+        <progress id="prestigeProgress" max="250000" value="0"></progress>
+        <div id="prestigeText" class="subtle prestige-copy"></div>
+        <button id="prestigeButton" class="action prestige" type="button">Prestige locked</button>
+      </article>
+
+      <div class="stats-grid">
+        <div class="stat card"><span>Lifetime credits</span><strong id="lifetime">0</strong></div>
+        <div class="stat card"><span>Taps</span><strong id="tapCount">0</strong></div>
+        <div class="stat card"><span>Prestiges</span><strong id="prestigeCount">0</strong></div>
+        <div class="stat card"><span>This run</span><strong id="runCredits">0</strong></div>
+      </div>
+
+      <button id="resetSave" class="reset-button" type="button">Reset save</button>
+    </section>
+  </main>
+
+  <nav class="bottom-nav" aria-label="Game navigation">
+    <button type="button" class="is-active" data-tab="terminal"><span>▦</span>Terminal</button>
+    <button type="button" data-tab="dispatch"><span>⚡</span>Boosts</button>
+    <button type="button" data-tab="network"><span>◆</span>Prestige</button>
+  </nav>
+
+  <div id="toast" class="toast" role="status" aria-live="polite">
+    <strong id="toastTitle"></strong>
+    <span id="toastText"></span>
+  </div>
+
+  <div id="offlineModal" class="modal" aria-hidden="true">
+    <div class="modal-sheet card">
+      <h2>Welcome back</h2>
+      <p id="offlineText"></p>
+      <button id="collectOffline" class="action primary" type="button">Collect</button>
+    </div>
+  </div>
+
+  <button id="goldenCargo" class="golden-cargo" type="button" hidden>✨ GOLDEN CARGO</button>
+</body>
+</html>
